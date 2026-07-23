@@ -44,6 +44,7 @@ hardware/**/*.3mf
 hardware/**/*.kicad_pcb.zip
 hardware/**/gerbers/
 hardware/**/pcbway-gerbers/
+hardware/**/pcbway/
 hardware/**/jlcpcb/
 hardware/**/analysis/
 hardware/**/datasheets/
