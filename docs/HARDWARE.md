@@ -104,7 +104,10 @@ on the documentation layer, so they travel with the Gerbers. Read them before
 you order, and tell the fab house it is a flex, not a rigid board.
 
 JLCPCB and PCBWay both make these. For the main board, their assembly services
-can place most of the parts, which saves you the QFN reflow.
+can place most of the parts, which saves you the QFN reflow. The JLCPCB order-form
+settings used for these boards (flex material, ENIG, coverlay, stiffener, and the
+rest) are recorded in [JLCPCB-FAB-ORDER.md](JLCPCB-FAB-ORDER.md) so reorders stay
+consistent.
 
 ## Power
 
