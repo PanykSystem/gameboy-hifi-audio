@@ -53,6 +53,14 @@ The values below were captured from an order of this board.
 | Polyimide Thickness   | 0.225 mm  |
 | PI Stiffener Lift Tab | No        |
 
+The design does not call out a stiffener thickness — what it requires is a total
+finished thickness of 0.30 ±0.05 mm at the fingers, so the tail seats in the ZIF.
+Against a 0.11 mm flex body, JLCPCB's 0.225 mm polyimide lands at 0.335 mm, which
+is inside that band. Another fab with a different set of stiffener thicknesses
+picks whatever hits the same total. The stiffener area itself is the filled
+rectangle on the `JLC_Stiffener_Bottom` layer, at the tip of the connector tail
+on the bottom side.
+
 ### EMI shielding
 
 | Setting            | Value   |

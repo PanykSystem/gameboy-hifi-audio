@@ -30,7 +30,7 @@
 		(33 "B.Fab" user)
 		(39 "User.1" user)
 		(41 "User.2" user)
-		(43 "User.3" back "JLC_Stiffener_Bottom_0.2mm")
+		(43 "User.3" back "JLC_Stiffener_Bottom")
 		(45 "User.4" user)
 		(49 "User.6" user)
 	)
@@ -177228,7 +177228,7 @@
 			(justify left bottom mirror)
 		)
 	)
-	(gr_text "  FLEX PCB FABRICATION NOTES - agb-hifi-audio-fpc\n  1. Material: 2-layer flexible PCB, polyimide. Finished copper 0.5 oz (18 um)\n     both layers. Flex body thickness 0.11-0.13 mm (excluding stiffener).\n  2. Finish: ENIG all exposed copper, including the connector fingers and the\n     edge lands (note 5).\n  3. Coverlay both sides. Openings per the mask layers in the supplied data.\n  4. STIFFENER (one, connector tail only): polyimide stiffener on the BOTTOM\n     side under the gold-finger region only, per the stiffener outline on this (User_Comments) layer.\n     CRITICAL: total finished thickness at the fingers = 0.30 +/-0.05 mm\n     (mates with Hirose FH12A-12S-0.5SH ZIF). Stiffener must end before the\n     bend region - see outline. No stiffener anywhere else: all other pad\n     areas (U6 land, edge lands, ring pads) are soldered down flat and must\n     remain bare flex.\n  5. EDGE-METALLIZED LANDS - INTENTIONAL: four copper rectangles on the top\n     layer extend flush to the board outline (two at the R30/R31 corner, two\n     at the CP4 tab). Do NOT pull copper back from the outline at these\n     features; cutting through copper here is required. These lands are\n     hand-soldered at the edge after installation. All other copper observes\n     >=0.25 mm outline clearance.\n  6. CRITICAL DIMENSIONS: connector tail width 6.5 +/-0.05 mm across the\n     finger region; finger pitch 0.5 mm. Outline elsewhere +/-0.1 mm.\n  7. The 180-degree fold in the tail is a one-time installation bend (static,\n     not dynamic). No special bend construction required; do not place\n     stiffener or coverlay transitions inside the bend region.\n  8. Min trace/space in the design: 0.15 mm (at the connector fingers).\n  9. Electrical test: 100% (netlist provided in the fabrication data)."
+	(gr_text "  FLEX PCB FABRICATION NOTES - agb-hifi-audio-fpc\n  1. Material: 2-layer flexible PCB, polyimide. Finished copper 0.5 oz (18 um)\n     both layers. Flex body thickness 0.11-0.13 mm (excluding stiffener).\n  2. Finish: ENIG all exposed copper, including the connector fingers and the\n     edge lands (note 5).\n  3. Coverlay both sides. Openings per the mask layers in the supplied data.\n  4. STIFFENER (one, connector tail only): polyimide stiffener on the BOTTOM\n     side under the gold-finger region only, per the stiffener outline on the stiffener layer in the supplied data.\n     CRITICAL: total finished thickness at the fingers = 0.30 +/-0.05 mm\n     (mates with Hirose FH12A-12S-0.5SH ZIF). Stiffener must end before the\n     bend region - see outline. No stiffener anywhere else: all other pad\n     areas (U6 land, edge lands, ring pads) are soldered down flat and must\n     remain bare flex.\n  5. EDGE-METALLIZED LANDS - INTENTIONAL: four copper rectangles on the top\n     layer extend flush to the board outline (two at the R30/R31 corner, two\n     at the CP4 tab). Do NOT pull copper back from the outline at these\n     features; cutting through copper here is required. These lands are\n     hand-soldered at the edge after installation. All other copper observes\n     >=0.25 mm outline clearance.\n  6. CRITICAL DIMENSIONS: connector tail width 6.5 +/-0.05 mm across the\n     finger region; finger pitch 0.5 mm. Outline elsewhere +/-0.1 mm.\n  7. The 180-degree fold in the tail is a one-time installation bend (static,\n     not dynamic). No special bend construction required; do not place\n     stiffener or coverlay transitions inside the bend region.\n  8. Min trace/space in the design: 0.15 mm (at the connector fingers).\n  9. Electrical test: 100% (netlist provided in the fabrication data)."
 		(at 102.23 149.09 0)
 		(layer "Cmts.User")
 		(uuid "d4fdc21a-e354-488e-aad5-3ca0028fccc1")
@@ -177241,16 +177241,16 @@
 			(justify left bottom)
 		)
 	)
-	(gr_text "STIFFENER: POLYIMIDE, BOTTOM SIDE\n(OPPOSITE GOLD FINGERS)\nTOTAL THICKNESS AT FINGERS 0.30 +/-0.05 mm"
-		(at 86.25 132.9 0)
+	(gr_text "STIFFENER - CONNECTOR TAIL ONLY\nPOLYIMIDE, BOTTOM SIDE, OPPOSITE\nTHE GOLD FINGERS.\nAREA = THE FILLED RECTANGLE ON THIS\nLAYER, 6.525 x 4.825 mm, FLUSH WITH\nTHE TAIL TIP.\nCRITICAL: TOTAL FINISHED THICKNESS\nAT THE FINGERS = 0.30 +/-0.05 mm.\nSELECT THE STIFFENER THICKNESS TO\nSUIT YOUR STACKUP.\nMUST END BEFORE THE BEND REGION.\nNO STIFFENER ANYWHERE ELSE."
+		(at 78.1 128 0)
 		(layer "User.3")
 		(uuid "a6f2bd69-8793-43ab-b64f-7ed8b1f84834")
 		(effects
 			(font
-				(size 1 1)
-				(thickness 0.15)
+				(size 0.8 0.8)
+				(thickness 0.12)
 			)
-			(justify bottom mirror)
+			(justify left top)
 		)
 	)
 	(segment
