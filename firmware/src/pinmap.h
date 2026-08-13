@@ -39,13 +39,24 @@
 // app_sm asserts mute when BT is STREAMING or wired HP is plugged.
 #define PIN_PAM_SD       4
 
-// ----- Wake-source inputs (RTC GPIOs, input-only, external 10k pull-ups) -----
+// ----- Wake-source inputs (RTC GPIOs, input-only) -----
+// The two are not wired alike: HP-detect has a pull-up on the mod PCB, the
+// Connect/Pair line has none anywhere. Do not group them.
+//
 // Connect/Pair button: the mod's control input (connect / pair, deep-sleep
 // wake, boot-time factory reset). Tapped off the GBA R shoulder net.
-#define PIN_CP_BUTTON   34   // LOW = pressed (idle pulled HIGH by 10k)
+// The PAIR net is just U1 pin 9 and FPC1 pin 9: no pull-up on the mod PCB, none
+// on the flex, and GPIO34 has no internal pull. What holds it HIGH is the AGB
+// CPU's own keypad pull-up, reached through the hand-soldered wire at flex J4.
+// So with the flex off, or that wire unsoldered, this pin floats and reads LOW,
+// which is indistinguishable from a held button. harness.c calls that out and
+// main.c refuses to factory-reset on it without a battery rail.
+#define PIN_CP_BUTTON   34   // LOW = pressed (held HIGH by the AGB keypad pull-up, off-board)
 
 // HP-detect. Polarity is inverted vs a typical detect line: the GBA's internal
 // headphone-jack switch grounds this sense line when nothing is plugged in.
-// With the external 10k pull-up to 3.3 V, the ESP32 reads HIGH = plugged,
-// LOW = unplugged.
+// R10 10k to +3V3 on the mod PCB pulls it up (through the R11 1k / C22 10n RC),
+// so the ESP32 reads HIGH = plugged, LOW = unplugged. That pull-up sits upstream
+// of FPC1, so an unplugged flex also reads HIGH: "plugged" and "sense line open"
+// are the same level here, and only context separates them (see harness.c).
 #define PIN_HP_DETECT   35   // HIGH = headphones plugged, LOW = unplugged

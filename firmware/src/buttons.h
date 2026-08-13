@@ -6,6 +6,10 @@
 // active-HIGH, inverted-polarity sense line, see pinmap.h) inputs with
 // edge-triggered interrupts and a 20 ms debouncer task.
 //
+// Neither pin has an internal pull, and only HP-detect has one on the board. An
+// unconnected Connect/Pair line floats and reads as permanently pressed, so the
+// "boot state" log below is not proof of a real press. harness.c classifies it.
+//
 // The Connect/Pair button drives a chime-guided hold menu. As the hold passes
 // each threshold the device chimes that rung (BTN_EV_CP_ZONE_*); the action
 // fires on release for whichever zone the press is released in (so over-holding

@@ -152,6 +152,7 @@ firmware/src/
   ble_config.{h,c}  BLE GATT config server (drives the web page)
   bt_a2d.{h,c}      Bluedroid wrapper: connect, pair, media, bonds, events
   buttons.{h,c}     debounced ISR for the control button and HP-detect
+  harness.{h,c}     install diagnostics for the four signals crossing to the GBA
   app_sm.{h,c}      the state machine, speaker-amp gating, and sleep policy
 ```
 
@@ -282,6 +283,7 @@ mode a|b             set operating mode (a = bypass/battery, b = DSP)
 unplug stay|b        behavior on HP unplug in Mode A
 hold [c p m e]       R-button hold thresholds, ms
 wheel on|off         VOL wheel drives volume
+diag                 install check: VBAT / VOL / PAIR / HP
 ls                   list the clip store
 save                 persist settings to NVS
 get                  show current settings
@@ -289,6 +291,33 @@ get                  show current settings
 
 There are also a few bench helpers (`out1`, `out2`, `outvol`, `codecmode`,
 `hp`, `sleep`) for hardware bring-up.
+
+## Install check
+
+Four signals run from the mod board to the Game Boy through `FPC1` and the flex,
+and `harness.c` classifies each one. The report goes to the boot log, the `diag`
+console command, and the BLE `diag` characteristic that drives the web card.
+
+| Signal | FPC1 pin | Open reads as | Why |
+| --- | --- | --- | --- |
+| VBAT | 11, 12 | ~280 mV vs 2000-3200 installed | the `R20`/`R21` divider is on-board but the rail it measures is not |
+| VOL | 7 | raw ~16 vs a ~330 floor | the wheel is a VBAT-referenced divider, so its wiper cannot reach ground |
+| PAIR | 9, then flex `J4` | stuck pressed | no pull-up exists on this net anywhere, so it floats LOW |
+| HP | 8 | stuck plugged | `R10` pulls it up on-board, upstream of the connector |
+
+Two consequences worth knowing:
+
+- **PAIR floats.** The AGB CPU's keypad pull-up is what holds it HIGH, reached
+  through the hand-soldered wire at flex `J4`. A bare board therefore reads the
+  Connect/Pair button as permanently held. The boot-time factory reset is gated
+  on the battery rail for exactly this reason: without it, every bench visit
+  wiped a repaired unit's bonds.
+- **HP cannot be judged alone.** "Headphones plugged" and "sense line open" are
+  the same level. The report only calls it open once VBAT says the board is on
+  bench power, where headphones are implausible.
+
+An open VOL line is also ignored rather than obeyed, so a floating wire cannot
+drag the volume to zero and hold it there.
 
 ## Web config page
 

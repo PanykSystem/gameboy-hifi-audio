@@ -25,6 +25,7 @@
 #include "dsp.h"
 #include "es8388.h"
 #include "fs.h"
+#include "harness.h"
 #include "i2s_codec.h"
 #include "pinmap.h"
 #include "settings.h"
@@ -97,7 +98,7 @@ static void gate_cp_wake(void)
     gpio_config_t in = {
         .pin_bit_mask = (1ULL << PIN_CP_BUTTON) | (1ULL << PIN_HP_DETECT),
         .mode         = GPIO_MODE_INPUT,
-        .pull_up_en   = GPIO_PULLUP_DISABLE,   // external 10k pull-ups
+        .pull_up_en   = GPIO_PULLUP_DISABLE,   // HP by R10 on-board, CP off-board (see pinmap.h)
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type    = GPIO_INTR_DISABLE,
     };
@@ -139,6 +140,16 @@ static void maybe_factory_reset(void)
     }
     if (gpio_get_level(PIN_CP_BUTTON) != 0) {
         return;  // button not held at boot
+    }
+    // PIN_CP_BUTTON has no pull-up on either board and GPIO34 has no internal
+    // one, so an unconnected PAIR wire floats and reads exactly like a held
+    // button. Require the battery rail before believing it: with no rail the
+    // board is on the programming header, where nobody is holding anything.
+    // Without this every bench visit silently wipes a repaired unit's bonds.
+    if (!harness_rail_present()) {
+        ESP_LOGW(TAG, "Connect/Pair reads held but the battery rail is absent; "
+                      "treating it as an open PAIR line, not a factory reset");
+        return;
     }
     ESP_LOGW(TAG, "Connect/Pair held at boot, keep holding %d s for factory reset",
              CONFIG_GBHIFI_FACTORY_RESET_S);
@@ -296,7 +307,7 @@ void app_main(void)
     gpio_config_t cp = {
         .pin_bit_mask = 1ULL << PIN_CP_BUTTON,
         .mode         = GPIO_MODE_INPUT,
-        .pull_up_en   = GPIO_PULLUP_DISABLE,   // external 10k pull-up
+        .pull_up_en   = GPIO_PULLUP_DISABLE,   // held HIGH off-board by the AGB keypad pull-up
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type    = GPIO_INTR_DISABLE,
     };
@@ -399,6 +410,16 @@ void app_main(void)
     maybe_factory_reset();
 
     ESP_ERROR_CHECK(app_sm_start());
+
+    // Install diagnostics. The report is logged at every boot: on an installed
+    // unit it is four ok lines, and on the bench it is the QA pass, naming the
+    // connector pin behind each bad signal.
+    ESP_ERROR_CHECK(harness_init());
+    {
+        harness_report_t rep;
+        harness_eval(&rep);
+        harness_log_report(&rep);
+    }
 
     // UART REPL control surface, started last. The web UI (BLE config) drives the
     // same settings_* API. Needs an interactive serial monitor for input.

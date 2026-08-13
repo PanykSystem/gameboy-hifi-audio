@@ -35,6 +35,7 @@
 #include "sfx.h"
 #include "audio_pipeline.h"   // spectrum tap for the BLE web visualizer
 #include "app_sm.h"           // app_sm_hp_plugged(): distinguishes speaker vs headphone for the spectrum source byte
+#include "harness.h"          // install diagnostics served on the DIAG characteristic
 
 static const char *TAG = "ble_cfg";
 
@@ -83,6 +84,11 @@ static const uint8_t CMD_UUID128[16] = {
 static const uint8_t SPEC_UUID128[16] = {
     0xaa, 0x05, 0x04, 0x03, 0x02, 0x01, 0x8f, 0x9a,
     0x6b, 0x4c, 0x2e, 0x1f, 0x07, 0x00, 0x4d, 0x5a,
+};
+//   diag:    5a4d0008-...   (Read + Notify: packed harness install report)
+static const uint8_t DIAG_UUID128[16] = {
+    0xaa, 0x05, 0x04, 0x03, 0x02, 0x01, 0x8f, 0x9a,
+    0x6b, 0x4c, 0x2e, 0x1f, 0x08, 0x00, 0x4d, 0x5a,
 };
 
 // Settings wire format: explicit little-endian byte layout, decoupled from the
@@ -213,6 +219,9 @@ enum {
     IDX_SPEC_DECL,
     IDX_SPEC_VAL,
     IDX_SPEC_CCCD,
+    IDX_DIAG_DECL,
+    IDX_DIAG_VAL,
+    IDX_DIAG_CCCD,
     IDX_NB,
 };
 
@@ -234,6 +243,9 @@ static uint8_t        s_cccd_val[2]     = {0, 0};  // settings CCCD (stack-manag
 static uint8_t        s_cccd_ota_val[2] = {0, 0};  // OTACTL CCCD (stack-managed)
 static uint8_t        s_cccd_log_val[2]  = {0, 0};  // LOG CCCD (stack-managed)
 static uint8_t        s_cccd_spec_val[2] = {0, 0};  // SPECTRUM CCCD (stack-managed)
+static uint8_t        s_cccd_diag_val[2] = {0, 0};  // DIAG CCCD (stack-managed)
+static const uint8_t  k_prop_rn  = ESP_GATT_CHAR_PROP_BIT_READ |
+                                   ESP_GATT_CHAR_PROP_BIT_NOTIFY;    // DIAG
 static uint8_t        s_ota_attr_dummy  = 0;       // placeholder initial value for the AUTO_RSP OTA chars
 
 static const esp_gatts_attr_db_t k_gatt_db[IDX_NB] = {
@@ -324,6 +336,20 @@ static const esp_gatts_attr_db_t k_gatt_db[IDX_NB] = {
         {ESP_UUID_LEN_16, (uint8_t *)&k_cccd_uuid,
          ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
          sizeof(s_cccd_spec_val), sizeof(s_cccd_spec_val), s_cccd_spec_val} },
+
+    // DIAG characteristic: the packed harness install report + CCCD. Served by
+    // the app on read (RSP_BY_APP) so every read samples fresh, and notified on
+    // change so a page left open sees a flex reseat without polling.
+    [IDX_DIAG_DECL] = { {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&k_char_decl_uuid, ESP_GATT_PERM_READ,
+         sizeof(uint8_t), sizeof(uint8_t), (uint8_t *)&k_prop_rn} },
+    [IDX_DIAG_VAL] = { {ESP_GATT_RSP_BY_APP},
+        {ESP_UUID_LEN_128, (uint8_t *)DIAG_UUID128, ESP_GATT_PERM_READ,
+         HARNESS_PACKED_LEN, 0, NULL} },
+    [IDX_DIAG_CCCD] = { {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&k_cccd_uuid,
+         ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+         sizeof(s_cccd_diag_val), sizeof(s_cccd_diag_val), s_cccd_diag_val} },
 };
 
 // ---- runtime state --------------------------------------------------------
@@ -333,6 +359,7 @@ static uint16_t      s_conn_id       = 0;
 static esp_bd_addr_t s_peer_bda      = {0};  // current central, for conn-param updates
 static bool          s_connected     = false;
 static bool          s_notify_on     = false;
+static bool          s_diag_notify_on = false;
 static uint32_t      s_last_gen      = 0;
 static esp_timer_handle_t s_notify_timer = NULL;
 static uint16_t      s_mtu           = 23;   // negotiated ATT MTU (ESP_GATTS_MTU_EVT)
@@ -997,6 +1024,19 @@ static void ble_spec_task(void *arg)
 // Poll the settings generation; push the current blob to a subscribed central
 // whenever it changes. This catches edits from either control surface (BLE write
 // or the UART console) so the web UI stays live without re-reading. Also hosts
+// Push the install report when a signal's state flips (flex reseated, PAIR wire
+// resoldered), so a config page left open updates without polling. Runs on the
+// harness sampler task.
+static void on_harness_change(const harness_report_t *rep)
+{
+    if (!s_connected || !s_diag_notify_on || s_gatts_if == ESP_GATT_IF_NONE) return;
+    uint8_t buf[HARNESS_PACKED_LEN];
+    size_t n = harness_pack(rep, buf, sizeof(buf));
+    if (n == 0) return;
+    esp_ble_gatts_send_indicate(s_gatts_if, s_conn_id, s_handles[IDX_DIAG_VAL],
+                                n, buf, false /* notify, no confirm */);
+}
+
 // the OTA stall watchdog (cheap; runs on the same 750 ms tick).
 static void notify_timer_cb(void *arg)
 {
@@ -1181,6 +1221,7 @@ static void gatts_cb(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
                  param->disconnect.reason);
         s_connected = false;
         s_notify_on = false;
+        s_diag_notify_on = false;
         s_log_notify_on = false;
         s_spec_notify_on = false;
         audio_pipeline_spectrum_enable(false);   // stop the FFT tap when nobody's watching
@@ -1196,6 +1237,15 @@ static void gatts_cb(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
             rsp.attr_value.handle = param->read.handle;
             rsp.attr_value.len    = SETTINGS_WIRE_LEN;
             settings_to_wire(rsp.attr_value.value);
+            esp_ble_gatts_send_response(gatts_if, param->read.conn_id,
+                                        param->read.trans_id, ESP_GATT_OK, &rsp);
+        } else if (param->read.handle == s_handles[IDX_DIAG_VAL]) {
+            harness_report_t rep;
+            harness_eval(&rep);
+            esp_gatt_rsp_t rsp = {0};
+            rsp.attr_value.handle = param->read.handle;
+            rsp.attr_value.len    = harness_pack(&rep, rsp.attr_value.value,
+                                                 sizeof(rsp.attr_value.value));
             esp_ble_gatts_send_response(gatts_if, param->read.conn_id,
                                         param->read.trans_id, ESP_GATT_OK, &rsp);
         }
@@ -1268,6 +1318,11 @@ static void gatts_cb(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
                 audio_pipeline_spectrum_enable(s_spec_notify_on);  // gate the FFT tap
                 ESP_LOGI(TAG, "spectrum %s", s_spec_notify_on ? "on" : "off");
             }
+        } else if (param->write.handle == s_handles[IDX_DIAG_CCCD]) {
+            if (param->write.len >= 2) {
+                s_diag_notify_on = (param->write.value[0] & 0x01) != 0;
+                ESP_LOGI(TAG, "diag notify %s", s_diag_notify_on ? "on" : "off");
+            }
         } else if (param->write.handle == s_handles[IDX_SETTINGS_CCCD]) {
             // CCCD is AUTO_RSP (stack stores the value + sends the ack); we only
             // read it to track whether to push notifications.
@@ -1300,6 +1355,8 @@ esp_err_t ble_config_init(void)
     // would crawl). Web Bluetooth negotiates ~517; we pick chunk = MTU-3 at READY.
     err = esp_ble_gatt_set_local_mtu(517);
     if (err) ESP_LOGW(TAG, "set_local_mtu: %s", esp_err_to_name(err));
+
+    harness_set_change_cb(on_harness_change);
 
     // -3 dBm BLE TX matches the BR/EDR setting: a config phone is within a metre
     // and the lower power keeps RF noise off the analog front end.

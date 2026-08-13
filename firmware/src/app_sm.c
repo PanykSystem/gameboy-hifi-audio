@@ -180,6 +180,10 @@ static es8388_mode_t s_active_mode = ES8388_MODE_DSP;
 #define VOL_RAW_MIN     400
 #define VOL_RAW_MAX     3550
 #define VOL_OVERSAMPLE  16
+// Below this the VOL line is open, not turned down. The wheel is a VBAT-
+// referenced divider whose wiper cannot reach ground while connected (real floor
+// ~330); a disconnected line measures raw 16. See APP_SM_VOL_OPEN_RAW.
+#define VOL_OPEN_RAW    APP_SM_VOL_OPEN_RAW
 // Mode B wheel-poll cadence for the dedicated vol_task (see vol_task). Faster and
 // far more regular than the old 200 ms software-timer poll, which rode the
 // priority-1 timer daemon and got starved to hundreds of ms during A2DP streaming
@@ -204,6 +208,7 @@ static adc_cali_handle_t s_adc1_cali = NULL;   // ADC1 raw->mV (NULL = no batter
 static bool  s_wheel_enabled = true;
 static int   s_vol_last_pct  = -1;
 static float s_wheel_ema     = -1.0f;   // EMA of the raw ADC (<0 = unseeded)
+static bool  s_vol_open_warned = false; // rate-limit the open-line warning to once per episode
 
 // Tracks whether wired headphones are plugged into the GBA's jack (the HP-detect
 // line is HIGH). While true, the A2DP stream is suspended so the wired path
@@ -367,6 +372,12 @@ static int vol_read_pct_smoothed(void)
     if (s_wheel_ema < 0.0f) s_wheel_ema = (float)raw;          // seed on first read
     else s_wheel_ema += ((float)raw - s_wheel_ema) * VOL_EMA_ALPHA;
     return raw_to_pct(vol_batt_correct((int)(s_wheel_ema + 0.5f)));
+}
+
+bool app_sm_vol_line_open(void)
+{
+    int raw = vol_read_raw();
+    return (raw >= 0) && (raw < VOL_OPEN_RAW);
 }
 
 void app_sm_vol_wheel_read(int *raw_out, int *pct_out)
@@ -601,6 +612,19 @@ static void vol_apply_from_wheel(void)
     if (!s_wheel_enabled) return;
     int pct = vol_read_pct_smoothed();
     if (pct < 0) return;
+    // An open VOL line sits near ground, below anything the VBAT-referenced
+    // divider can produce, and would otherwise drag volume to 0 and hold it
+    // there. Freeze instead, and say so once per episode. s_wheel_ema is the
+    // smoothed raw the read above just updated, so this costs no extra sample.
+    if (s_wheel_ema >= 0.0f && s_wheel_ema < VOL_OPEN_RAW) {
+        if (!s_vol_open_warned) {
+            ESP_LOGW(TAG, "VOL line reads open (raw %d); wheel is not driving volume "
+                          "(check FPC1 pin 7)", (int)s_wheel_ema);
+            s_vol_open_warned = true;
+        }
+        return;
+    }
+    s_vol_open_warned = false;
     if (s_vol_last_pct >= 0 &&
         (pct - s_vol_last_pct < VOL_HYSTERESIS_PCT) &&
         (s_vol_last_pct - pct < VOL_HYSTERESIS_PCT)) {
@@ -658,8 +682,16 @@ void app_sm_prime_volume(void)
     // seed goes to the DSP volume; app_sm_start()'s poll takes over from here.
     vol_adc_init();
     if (!s_wheel_enabled) return;
-    int pct = vol_read_pct();          // one unsmoothed oversampled read (~1-2 ms)
-    if (pct < 0) return;               // ADC unavailable; keep the stored default
+    int raw = vol_read_raw();
+    if (raw < 0) return;               // ADC unavailable; keep the stored default
+    if (raw < VOL_OPEN_RAW) {
+        // Open line, not a wheel turned to zero. Seeding from it would boot every
+        // bench board at 0% and mask the stored setting.
+        ESP_LOGW(TAG, "VOL line reads open (raw %d); keeping the stored volume", raw);
+        return;
+    }
+    int pct = raw_to_pct(vol_batt_correct(raw));
+    if (pct < 0) return;
     s_vol_last_pct = pct;              // seed the poll's hysteresis reference
     settings_set_volume((uint8_t)pct);
     ESP_LOGI(TAG, "boot volume primed from wheel: %d%%", pct);

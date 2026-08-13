@@ -19,6 +19,7 @@
 #include "bt_a2d.h"
 #include "es8388.h"
 #include "fs.h"
+#include "harness.h"
 #include "settings.h"
 #include "sfx.h"
 
@@ -543,6 +544,37 @@ static int cmd_wavedump(int argc, char **argv)
 // discharge-curve model). Persist with `save`.
 static const char *const CHEM_NAMES[] = { "alkaline", "nimh", "lipo" };
 
+// `diag`: install diagnostics for the four signals crossing to the Game Boy
+// through FPC1. Prints per-signal state, the measured value, and the connector
+// pin to check when something is wrong. The same report the boot log emits.
+static int cmd_diag(int argc, char **argv)
+{
+    harness_report_t rep;
+    harness_eval(&rep);
+
+    printf("install: %s\n", rep.installed
+           ? "connected to a Game Boy"
+           : "NOT connected (no battery rail; bench or programming-header power)");
+    for (int i = 0; i < HARNESS_SIG_COUNT; i++) {
+        harness_sig_t s = (harness_sig_t)i;
+        int32_t v = rep.sig[i].value;
+        char val[24];
+        if (s == HARNESS_SIG_VBAT) {
+            if (v < 0) snprintf(val, sizeof(val), "--");
+            else       snprintf(val, sizeof(val), "%ld mV", (long)v);
+        } else if (s == HARNESS_SIG_VOL) {
+            if (v < 0) snprintf(val, sizeof(val), "--");
+            else       snprintf(val, sizeof(val), "raw %ld", (long)v);
+        } else {
+            snprintf(val, sizeof(val), "%s", v ? "high" : "low");
+        }
+        printf("  %-4s %-7s %-9s %s\n", harness_sig_name(s),
+               harness_state_name(rep.sig[i].state), val,
+               harness_sig_detail(&rep, s));
+    }
+    return 0;
+}
+
 static int cmd_batt(int argc, char **argv)
 {
     if (argc >= 2) {
@@ -665,6 +697,7 @@ static void register_cmds(void)
         { .command = "save",  .help = "Persist settings to NVS",                 .func = cmd_save },
         { .command = "get",   .help = "Show current settings",                   .func = cmd_get },
         { .command = "heap",  .help = "Show free heap (debug RAM pressure)",     .func = cmd_heap },
+        { .command = "diag",  .help = "Install diagnostics: VBAT/VOL/PAIR/HP harness check", .func = cmd_diag },
     };
     for (size_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
         ESP_ERROR_CHECK(esp_console_cmd_register(&cmds[i]));

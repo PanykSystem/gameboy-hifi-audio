@@ -78,6 +78,15 @@ void app_sm_set_boot_into_mode_a(bool v);
 // volume; in Mode A it sets the ES8388 output drivers.
 void app_sm_set_wheel_enabled(bool enabled);
 
+// Raw ADC floor below which the VOL line reads open rather than turned down. The
+// wheel is a VBAT-referenced divider, so its wiper cannot reach ground while
+// connected (calibrated floor ~330); a disconnected line measures ~16. Shared
+// with harness.c so both use one number.
+#define APP_SM_VOL_OPEN_RAW 150
+
+// True when the VOL wheel line reads open. Costs one oversampled ADC read.
+bool app_sm_vol_line_open(void);
+
 // Diagnostic: sample the VOL wheel right now. *raw_out gets the 12-bit ADC value
 // (-1 if the ADC is unavailable), *pct_out gets the mapped 0..100. The wheel is
 // VCC-referenced (ratiometric), so the top of travel reads below full-scale and

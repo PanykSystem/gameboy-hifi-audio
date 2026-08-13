@@ -226,6 +226,16 @@
   }
   .nav .tab:hover { color: var(--muted); }
   .nav .tab[aria-selected="true"] { color: var(--ink); }
+  /* Install-check badge: shown on the System tab while any harness signal reads
+     open, so a problem is visible from whichever tab you are on. */
+  .nav .tab-warn { display: inline-flex; align-items: center; margin-left: 0.4rem; color: var(--warn); }
+  .nav .tab-warn svg { width: 0.9em; height: 0.9em; display: block; }
+  .nav .tab-warn svg path { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; }
+  .nav .tab-warn svg rect, .nav .tab-warn svg circle { fill: currentColor; stroke: none; }
+  @media (prefers-reduced-motion: no-preference) {
+    .nav .tab-warn { animation: warnIn 0.28s ease-out; }
+    @keyframes warnIn { from { opacity: 0; transform: scale(0.6); } to { opacity: 1; transform: none; } }
+  }
 
   @media (max-width: 819px) {
     .nav { border-bottom: 1px solid var(--line); }
@@ -247,6 +257,8 @@
       content: ""; width: 0.5rem; aspect-ratio: 1; border-radius: 1px;
       background: var(--line-2); transition: background 0.16s, box-shadow 0.16s;
     }
+    /* Vertical rail: park the badge on the right edge so it lines up down the nav. */
+    .nav .tab-warn { margin-left: auto; }
     .nav .tab:hover { background: var(--surface); }
     .nav .tab[aria-selected="true"] { background: var(--surface); }
     .nav .tab[aria-selected="true"]::before { background: var(--signal); box-shadow: 0 0 8px var(--signal); }
@@ -491,6 +503,16 @@
   }
   #log:empty { display: none; }
   .ok-t { color: var(--signal); } .err-t { color: var(--danger); } .dim-t { color: var(--faint); }
+  /* Install check: one row per harness signal. */
+  table.diag { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+  table.diag td { padding: 0.42rem 0.5rem 0.42rem 0; border-top: 1px solid var(--line); vertical-align: top; }
+  table.diag tr:first-child td { border-top: 0; }
+  table.diag .sig { font-weight: 600; white-space: nowrap; width: 3.4rem; }
+  table.diag .val { color: var(--faint); white-space: nowrap; width: 5rem; font-variant-numeric: tabular-nums; }
+  table.diag .det { color: var(--faint); }
+  table.diag tr[data-state="ok"]      .sig { color: var(--signal); }
+  table.diag tr[data-state="open"]    .sig { color: var(--danger); }
+  table.diag tr[data-state="unclear"] .sig { color: var(--warn); }
 
   #conOut {
     white-space: pre-wrap; word-break: break-word; background: oklch(0.13 0.006 200);
@@ -583,7 +605,7 @@
       <nav class="nav" id="tabs" role="tablist" aria-label="Sections" hidden>
         <button class="tab" role="tab" data-tab="tune"   aria-selected="true">Tune</button>
         <button class="tab" role="tab" data-tab="device" aria-selected="false">Device</button>
-        <button class="tab" role="tab" data-tab="system" aria-selected="false">System</button>
+        <button class="tab" role="tab" data-tab="system" aria-selected="false">System<span class="tab-warn" id="sysWarn" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.6 15.1 14.4H0.9z"/><rect x="7.25" y="5.9" width="1.5" height="4.3" rx="0.75"/><circle cx="8" cy="12.05" r="0.95"/></svg></span></button>
       </nav>
     </div>
 
@@ -787,6 +809,13 @@
 
         <!-- ---------- SYSTEM ---------- -->
         <section class="tab-panel stack" data-tab="system" role="tabpanel" hidden>
+          <div class="card" id="installCard" hidden>
+            <div class="card-head"><h2>Install check</h2><span class="hint" id="installVerdict">—</span></div>
+            <p class="note" style="margin-bottom:0.7rem">The four signals that run from the mod board to the Game Boy through the
+              flex. If one reads <b>open</b>, the pin named beside it is the place to look.</p>
+            <table class="diag" id="diagTable"><tbody></tbody></table>
+          </div>
+
           <div class="card">
             <div class="card-head"><h2>Firmware update</h2><span class="hint" id="fwRunning">—</span></div>
             <p class="note" id="fwInstalled">Installed firmware: —</p>
@@ -839,6 +868,7 @@ const OTADATA  = '5a4d0004-1f2e-4c6b-9a8f-0102030405aa';  // write-no-response (
 const LOG      = '5a4d0005-1f2e-4c6b-9a8f-0102030405aa';  // notify (device log/console stream)
 const CMD      = '5a4d0006-1f2e-4c6b-9a8f-0102030405aa';  // write (console command line)
 const SPECTRUM = '5a4d0007-1f2e-4c6b-9a8f-0102030405aa';  // notify (stereo audio spectrum: L bytes then R bytes)
+const DIAG     = '5a4d0008-1f2e-4c6b-9a8f-0102030405aa';  // read + notify (install check: VBAT/VOL/PAIR/HP)
 const WIRE_LEN = 64;
 const VERSION  = 7;
 // OTA opcodes/status, must match the firmware BLE config.
@@ -848,7 +878,7 @@ const OTA = { BEGIN:0x01, END:0x02, ABORT:0x03, GET_INFO:0x04,
               CLIP_BEGIN:0x05, CLIP_END:0x06, ROLLBACK:0x07,
               READY:0x10, ACK:0x11, DONE:0x12, INFO:0x13, CLIP_DONE:0x14, ERROR:0x1f };
 
-let device, settingsChr, actionChr, otaCtlChr, otaDataChr, logChr, cmdChr, specChr;
+let device, settingsChr, actionChr, otaCtlChr, otaDataChr, logChr, cmdChr, specChr, diagChr;
 let conDec = new TextDecoder();   // streaming UTF-8 decoder for the device log
 let specL = null, specR = null, specSmL = null, specSmR = null, specPkL = null, specPkR = null, specRAF = 0, specSrc = -1;
 let specLastFrame = 0;    // timestamp of the last spectrum frame (drives the LIVE indicator)
@@ -1651,6 +1681,9 @@ function setConnected(on) {
     logChr = cmdChr = null;
     specChr = null;   // stops the spectrum RAF loop
     specSrc = -1;     // re-label on reconnect
+    diagChr = null;
+    $('installCard').hidden = true;   // the reading is only true while connected
+    setSysWarn([]);
   }
 }
 
@@ -1690,6 +1723,85 @@ function onSpectrum(e) {
     $('specHint').textContent = SRC_LABEL[src] ?? 'live output';
     if (SRC_OUT[src]) setOutput(SRC_OUT[src]);  // speaker / bluetooth / headphone
   }
+}
+
+// ---- install check --------------------------------------------------------
+// Wire format (harness_pack): installed byte, then one state byte per signal,
+// then one int32 LE value per signal, in SIG order.
+const DIAG_SIGS = ['VBAT', 'VOL', 'PAIR', 'HP'];
+const DIAG_STATE = ['ok', 'open', 'unclear', '--'];
+// Detail text mirrors harness_sig_detail() so the page reads the same as the
+// console and the boot log.
+const DIAG_DETAIL = {
+  VBAT: { ok: 'battery rail present',
+          open: 'battery rail absent, running on external power (FPC1 pins 11, 12)',
+          '--': 'battery sense unavailable' },
+  VOL:  { ok: 'wheel reads in range',
+          open: 'wheel line open, wheel ignored (check FPC1 pin 7)',
+          unclear: 'reads low, but the wheel is fed from the absent VBAT rail',
+          '--': 'VOL ADC unavailable' },
+  PAIR: { ok: 'idle, wire is connected',
+          open: 'reads pressed with nothing to press it: R shoulder wire open (FPC1 pin 9 to flex J4)',
+          unclear: 'reads pressed, could still be a real hold',
+          '--': 'not sampled yet' },
+  HP:   { ok: 'headphone jack sensing correctly',
+          open: 'stuck plugged, HP sense line open (check FPC1 pin 8)',
+          unclear: 'reads plugged: headphones in, or the sense line is open' },
+};
+
+function diagValueText(sig, v) {
+  if (sig === 'VBAT') return v < 0 ? '—' : `${v} mV`;
+  if (sig === 'VOL')  return v < 0 ? '—' : `raw ${v}`;
+  return v ? 'high' : 'low';
+}
+
+function renderDiag(dv) {
+  // [0] version, [1] installed, [2] signal count N, [3..3+N) states, then N
+  // int32 values. Reading N off the wire rather than assuming our own is what
+  // lets newer firmware add a signal without breaking this page: we render the
+  // ones we have names for and skip the rest.
+  if (dv.byteLength < 3) return;
+  if (dv.getUint8(0) !== 1) return;               // unknown format version
+  const n = dv.getUint8(2);
+  if (dv.byteLength < 3 + n + n * 4) return;
+  const shown = Math.min(n, DIAG_SIGS.length);
+  const installed = dv.getUint8(1) === 1;
+  $('installVerdict').textContent = installed ? 'connected to a Game Boy' : 'not connected';
+  $('installVerdict').className = installed ? 'hint ok-t' : 'hint err-t';
+
+  const rows = DIAG_SIGS.slice(0, shown).map((sig, i) => {
+    const state = DIAG_STATE[dv.getUint8(3 + i)] ?? '--';
+    const val   = dv.getInt32(3 + n + i * 4, true);
+    const det   = (DIAG_DETAIL[sig] || {})[state] ?? '';
+    const td = (cls, text) => {
+      const e = document.createElement('td');
+      e.className = cls; e.textContent = text; return e;
+    };
+    const tr = document.createElement('tr');
+    tr.dataset.state = state;
+    tr.append(td('sig', sig), td('val', diagValueText(sig, val)), td('det', det));
+    return tr;
+  });
+  const body = $('diagTable').tBodies[0];
+  body.replaceChildren(...rows);
+  $('installCard').hidden = false;
+
+  // Badge the System tab so a problem is visible from any tab. Only `open`
+  // counts: `unclear` is the normal reading for headphones plugged in or a
+  // button genuinely being held, and badging those would cry wolf.
+  const bad = DIAG_SIGS.slice(0, shown).filter((_, i) => DIAG_STATE[dv.getUint8(3 + i)] === 'open');
+  setSysWarn(bad);
+}
+
+// Show or clear the System-tab warning badge. `bad` is the list of signal names
+// reading open, empty to clear.
+function setSysWarn(bad) {
+  const el = $('sysWarn');
+  if (!el) return;
+  el.hidden = bad.length === 0;
+  const msg = bad.length ? `Install check: ${bad.join(', ')} reading open` : '';
+  el.title = msg;
+  el.setAttribute('aria-label', msg);
 }
 
 function onDisconnected() {
@@ -1771,6 +1883,23 @@ async function setupServices(svc) {
   } catch {
     specChr = null;
     $('spectrum').hidden = true;
+  }
+
+  // Install check. Read once for the current picture, then subscribe so a flex
+  // reseat or a resoldered PAIR wire updates the card without a refresh.
+  try {
+    diagChr = await svc.getCharacteristic(DIAG);
+    renderDiag(await diagChr.readValue());
+    await diagChr.startNotifications();
+    diagChr.addEventListener('characteristicvaluechanged', (e) => renderDiag(e.target.value));
+    log('install check attached', 'dim-t');
+  } catch {
+    // Firmware predating the DIAG characteristic. Hide the card and clear the
+    // badge, so a warning from a previously-connected device can't linger and
+    // look like it belongs to this one.
+    diagChr = null;
+    $('installCard').hidden = true;
+    setSysWarn([]);
   }
 }
 
