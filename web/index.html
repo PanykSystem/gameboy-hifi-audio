@@ -1745,7 +1745,13 @@ function setConnected(on) {
   if (on) {
     setStatus('connected', 'Connected');
     setClipBusy(false);   // a clip converted while offline becomes sendable now
-    setOutput('spk');
+    // Spectrum notifications are subscribed in setupServices(), which runs before
+    // this, so onSpectrum has usually already followed the live source by now.
+    // Seed from that rather than forcing Speaker, which used to clobber it -- and
+    // since onSpectrum only follows on a *change*, the clobber stuck until the
+    // user unplugged headphones or started Bluetooth. Unknown source (no spectrum
+    // characteristic, or no frame yet) still defaults to Speaker.
+    setOutput(SRC_OUT[specSrc] ?? 'spk');
     showTab('tune');
     $('panel').classList.add('panel-in');
     // strip the one-shot entrance class after it plays so re-renders don't repeat it
