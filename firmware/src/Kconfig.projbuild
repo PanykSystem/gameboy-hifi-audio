@@ -292,10 +292,28 @@ menu "GameBoy HiFi Audio"
 
         config GBHIFI_DSP_NR_LPF_HZ
             int "Noise reduction: low-pass corner (Hz, 0 = off)"
-            default 0
+            default 6700
             range 0 21000
             help
-                Rolls off high-frequency hiss. Off by default (GBA-specific).
+                Rolls off high-frequency hiss and the GBA's nearest-neighbor
+                resampling images. The 6700 Hz default sits at the Nyquist of
+                the ~13.4 kHz sample rate most MP2K (Sappy) games mix at, so
+                everything above it is aliasing, not program. Runtime-tunable
+                per GBA/game via `nr lpf <hz> [order]`; 0 disables.
+
+        config GBHIFI_DSP_NR_LPF_ORDER
+            int "Noise reduction: low-pass slope (Butterworth order 2/4/6)"
+            default 6
+            range 2 6
+            help
+                Steepness of the low-pass, 12 dB per octave per 2 orders. Order
+                2 is a gentle hiss roll-off; 4 and 6 approximate a
+                reconstruction filter for the GBA's nearest-neighbor resampling
+                images when the corner is set at the game's PCM Nyquist
+                (typically 5-7 kHz). Default 6: the steep cut kills the images
+                while keeping program brightness up to the corner. Odd values
+                snap up to the next even order. Runtime-tunable via
+                `nr lpf <hz> [order]`.
 
         config GBHIFI_DSP_NR_NOTCH_HZ
             int "Noise reduction: notch center (Hz, 0 = off)"

@@ -124,7 +124,10 @@ static const uint8_t DIAG_UUID128[16] = {
 //   [31..32] batt vbat_mv u16 (READ-ONLY status, writes ignored)
 //   [33] batt band (batt_band_t: 0=crit 1=low 2=good 3=full 4=unknown; READ-ONLY)
 //   [34] batt pct 0..100, 0xFF = no percent for this chemistry (READ-ONLY)
-//   [35..63] reserved, zero
+//   ---- added in version 14 ----
+//   [35..36] nr_lpf_hz u16 (reconstruction low-pass corner, 0 = off)
+//   [37] nr_lpf_order (Butterworth order 2/4/6)
+//   [38..63] reserved, zero
 
 // Action characteristic opcodes (byte 0 of the write).
 enum {
@@ -443,8 +446,12 @@ static void settings_to_wire(uint8_t *b)
     b[32] = (uint8_t)(vb >> 8);
     b[33] = (uint8_t)bat.band;
     b[34] = (bat.pct >= 0) ? (uint8_t)bat.pct : 0xff;   // 0xFF = no percent (banded chem)
+    // ---- version 14: reconstruction low-pass (setting) ----
+    b[35] = (uint8_t)(s.nr_lpf_hz & 0xff);
+    b[36] = (uint8_t)(s.nr_lpf_hz >> 8);
+    b[37] = s.nr_lpf_order;
     // Reserved tail: zeroed so a UI can tell "field not set" from stale bytes.
-    memset(&b[35], 0, SETTINGS_WIRE_LEN - 35);
+    memset(&b[38], 0, SETTINGS_WIRE_LEN - 38);
 }
 
 // Apply a settings write through the validating setters (live, not persisted;
@@ -475,6 +482,16 @@ static void wire_to_settings(const uint8_t *b, uint16_t len)
     if (len > 28) settings_set_startup_mode(b[28]);
     // ---- version 12: battery chemistry (bytes 31..34 are read-only status) ----
     if (len > 30) settings_set_chemistry(b[30]);
+    // ---- version 14: reconstruction low-pass corner + order. Only the LPF is
+    // web-exposed; the other NR filters keep their current (console-tuned)
+    // values, so read-modify-write through the same validating setter.
+    if (len > 37) {
+        gbhifi_settings_t cur;
+        settings_get(&cur);
+        uint16_t hz = (uint16_t)(b[35] | (b[36] << 8));
+        settings_set_nr(cur.nr_hpf_hz, hz, cur.nr_notch_hz, cur.nr_notch_q);
+        settings_set_nr_lpf_order(b[37]);
+    }
 }
 
 static void do_action(const uint8_t *v, uint16_t len)
@@ -997,6 +1014,26 @@ static void ble_cmd_task(void *arg)
     }
 }
 
+// Spectrum notify interval, runtime-tunable (bench: `radio specms <ms>`, not
+// persisted). Every notify is a radio TX burst whose supply transient can
+// couple into the ADC capture as an audible click, so the interval is the knob
+// that trades visualizer frame rate against click density while the web card
+// is open. Default SPEC_INTERVAL_MS (~20 fps).
+static volatile uint16_t s_spec_interval_ms = SPEC_INTERVAL_MS;
+
+void ble_config_set_spec_interval(uint16_t ms)
+{
+    if (ms < 20)   ms = 20;
+    if (ms > 1000) ms = 1000;
+    s_spec_interval_ms = ms;
+    ESP_LOGI(TAG, "spectrum notify interval %u ms", ms);
+}
+
+uint16_t ble_config_get_spec_interval(void)
+{
+    return s_spec_interval_ms;
+}
+
 // Compute + notify the stereo audio spectrum at ~20 fps while a client watches.
 // The FFT (audio_pipeline_compute_spectrum) runs here, not in the audio task.
 static void ble_spec_task(void *arg)
@@ -1016,7 +1053,7 @@ static void ble_spec_task(void *arg)
             esp_ble_gatts_send_indicate(s_gatts_if, s_conn_id, s_handles[IDX_SPEC_VAL],
                                         (uint16_t)(1 + n), frame, false /* notify */);
         }
-        vTaskDelay(pdMS_TO_TICKS(SPEC_INTERVAL_MS));
+        vTaskDelay(pdMS_TO_TICKS(s_spec_interval_ms));
     }
 }
 

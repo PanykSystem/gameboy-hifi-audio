@@ -17,7 +17,7 @@
 // "dsp"). Bump GBHIFI_SETTINGS_VERSION when the struct layout changes; an
 // older/absent blob falls back to the Kconfig-seeded defaults.
 
-#define GBHIFI_SETTINGS_VERSION 13
+#define GBHIFI_SETTINGS_VERSION 14
 
 // Which boot chime the mod voices on a genuine power-on. Clip modes stream
 // /clips/<name>.gsfx; STARTUP_OFF plays nothing and leaves the live GBA
@@ -94,6 +94,12 @@ typedef struct {
     // filter. Use the `wavedump` capture + tools/plot_wavedump.py to find the tones.
     uint16_t nr_hpf_hz;        // high-pass corner: low-frequency hum
     uint16_t nr_lpf_hz;        // low-pass corner: high-frequency hiss
+    // LPF slope as Butterworth order (2, 4, or 6 = 12/24/36 dB per octave).
+    // Steeper orders approximate a proper reconstruction filter for the GBA's
+    // nearest-neighbor resampling images: game PCM runs at ~10-21 kHz, so
+    // everything above that source's Nyquist is aliasing, not program. 2 keeps
+    // the historical gentle hiss roll-off.
+    uint8_t  nr_lpf_order;
     uint16_t nr_notch_hz;      // notch center: a discrete tone (e.g. aliased PWM carrier)
     uint8_t  nr_notch_q;       // notch Q (sharpness); higher = narrower
     // Downward expander / noise gate: when the program level falls below
@@ -173,6 +179,9 @@ esp_err_t settings_set_sfx(bool enabled, int8_t level_db);
 esp_err_t settings_set_startup_mode(uint8_t mode);
 esp_err_t settings_set_nr(uint16_t hpf_hz, uint16_t lpf_hz, uint16_t notch_hz,
                           uint8_t notch_q);
+// Set the LPF slope (Butterworth order 2/4/6; odd/out-of-range values snap to
+// the nearest legal order).
+esp_err_t settings_set_nr_lpf_order(uint8_t order);
 esp_err_t settings_set_nr_gate(int8_t thresh_db, uint8_t range_db);
 // Set the Bluetooth hard-mute threshold (dBFS, <= 0; 0 = off).
 esp_err_t settings_set_nr_bt_mute(int8_t db);

@@ -58,6 +58,11 @@ void ble_config_set_advertising(bool on);
 // amplitude the TX power). Not persisted; defaults return on reboot.
 void ble_config_set_adv_interval_ms(uint32_t ms);
 void ble_config_set_tx_power_dbm(int dbm);
+// Spectrum notify interval (ms, clamped 20..1000; default ~50 = 20 fps). Each
+// notify is a radio TX burst; longer intervals mean fewer supply transients
+// while the web visualizer streams. Bench knob (`radio specms`), not persisted.
+void ble_config_set_spec_interval(uint16_t ms);
+uint16_t ble_config_get_spec_interval(void);
 
 #ifdef __cplusplus
 }

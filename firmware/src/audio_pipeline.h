@@ -69,6 +69,22 @@ bool audio_pipeline_is_silent(void);
 // floor. The dump briefly stalls audio; debug/bench use.
 void audio_pipeline_capture(int samples);
 
+// ---- load accounting (bench diagnostics) -----------------------------------
+// Per-block compute time of the pipeline task: measured from the moment an I2S
+// read returns to the moment the block is handed back to the DAC write. The
+// budget is the block's real-time length (~5.8 ms at 256 frames); a block whose
+// compute exceeds it starves the I2S DMA and clicks. Counters accumulate until
+// read and reset on read (`load` console command).
+typedef struct {
+    uint32_t blocks;     // blocks accumulated since last read
+    uint32_t avg_us;     // mean compute time per block
+    uint32_t max_us;     // worst block
+    uint32_t over;       // blocks that exceeded the budget
+    uint32_t budget_us;  // real-time budget per block
+} audio_load_t;
+
+void audio_pipeline_load_stats(audio_load_t *out);
+
 // ---- spectrum tap (BLE web visualizer) ------------------------------------
 // When enabled, the pipeline mirrors the post-DSP stereo program the user is
 // actually hearing into a ring buffer -- the local speaker/HP output, or the

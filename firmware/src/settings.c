@@ -46,6 +46,8 @@ static const char *TAG = "settings";
 #define HOLD_MS_MIN  (500)
 #define HOLD_MS_MAX  (15000)
 #define NR_HZ_MAX    (21000)   // noise-reduction filter freq ceiling (< Nyquist)
+// LPF order: legal values are 2/4/6; snap odd or out-of-range to the nearest.
+#define LPF_ORDER_SNAP(o) ((o) <= 3 ? 2 : ((o) <= 5 ? 4 : 6))
 #define NR_Q_MIN     (1)
 #define NR_Q_MAX     (40)
 #define GATE_DB_MIN     (-90)   // gate threshold floor, dBFS
@@ -76,6 +78,7 @@ static const gbhifi_settings_t s_defaults = {
     .startup_mode    = STARTUP_MODERN,
     .nr_hpf_hz       = CONFIG_GBHIFI_DSP_NR_HPF_HZ,
     .nr_lpf_hz       = CONFIG_GBHIFI_DSP_NR_LPF_HZ,
+    .nr_lpf_order    = CONFIG_GBHIFI_DSP_NR_LPF_ORDER,
     .nr_notch_hz     = CONFIG_GBHIFI_DSP_NR_NOTCH_HZ,
     .nr_notch_q      = CONFIG_GBHIFI_DSP_NR_NOTCH_Q,
     .nr_gate_thresh_db = CONFIG_GBHIFI_DSP_NR_GATE_THRESH_DB,
@@ -114,6 +117,7 @@ static void sanitise(gbhifi_settings_t *s)
     if (s->batt_chem    >= BATT_CHEM_COUNT)    s->batt_chem    = BATT_CHEM_ALKALINE;
     if (s->nr_hpf_hz   > NR_HZ_MAX) s->nr_hpf_hz   = NR_HZ_MAX;
     if (s->nr_lpf_hz   > NR_HZ_MAX) s->nr_lpf_hz   = NR_HZ_MAX;
+    s->nr_lpf_order = LPF_ORDER_SNAP(s->nr_lpf_order);
     if (s->nr_notch_hz > NR_HZ_MAX) s->nr_notch_hz = NR_HZ_MAX;
     s->nr_notch_q      = CLAMP(s->nr_notch_q, NR_Q_MIN, NR_Q_MAX);
     s->nr_gate_thresh_db = CLAMP(s->nr_gate_thresh_db, GATE_DB_MIN, 0);
@@ -289,6 +293,16 @@ esp_err_t settings_set_nr(uint16_t hpf_hz, uint16_t lpf_hz, uint16_t notch_hz,
     s_cur.nr_lpf_hz   = (lpf_hz   > NR_HZ_MAX) ? NR_HZ_MAX : lpf_hz;
     s_cur.nr_notch_hz = (notch_hz > NR_HZ_MAX) ? NR_HZ_MAX : notch_hz;
     s_cur.nr_notch_q  = CLAMP(notch_q, NR_Q_MIN, NR_Q_MAX);
+    s_generation++;
+    xSemaphoreGive(s_lock);
+    return ESP_OK;
+}
+
+esp_err_t settings_set_nr_lpf_order(uint8_t order)
+{
+    if (!s_lock) return ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_cur.nr_lpf_order = LPF_ORDER_SNAP(order);
     s_generation++;
     xSemaphoreGive(s_lock);
     return ESP_OK;

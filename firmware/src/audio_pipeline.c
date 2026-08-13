@@ -116,6 +116,30 @@ void audio_pipeline_set_silence_cb(audio_silence_cb_t cb)
     s_silence_cb = cb;
 }
 
+// Load accounting (see audio_pipeline.h). Written only by the pipeline task;
+// read + reset by the console. Plain aligned 32-bit accesses are atomic on
+// ESP32; the 64-bit accumulator can tear against a concurrent reset, costing at
+// worst one bench readout -- acceptable for diagnostics.
+static volatile uint64_t s_ld_acc_us  = 0;
+static volatile uint32_t s_ld_blocks  = 0;
+static volatile uint32_t s_ld_max_us  = 0;
+static volatile uint32_t s_ld_over    = 0;
+
+void audio_pipeline_load_stats(audio_load_t *out)
+{
+    if (!out) return;
+    uint32_t blocks = s_ld_blocks;
+    out->blocks    = blocks;
+    out->avg_us    = blocks ? (uint32_t)(s_ld_acc_us / blocks) : 0;
+    out->max_us    = s_ld_max_us;
+    out->over      = s_ld_over;
+    out->budget_us = (uint32_t)((uint64_t)READ_FRAMES * 1000000u / 44100u);
+    s_ld_acc_us = 0;
+    s_ld_blocks = 0;
+    s_ld_max_us = 0;
+    s_ld_over   = 0;
+}
+
 void audio_pipeline_capture(int samples)
 {
     if (samples <= 0 || samples > WAVEDUMP_MAX) samples = WAVEDUMP_MAX;
@@ -268,6 +292,7 @@ static void pipeline_task(void *arg)
         }
 
         size_t frames = bytes_read / FRAME_BYTES;
+        int64_t work_t0 = esp_timer_get_time();
 
         // On-demand capture: when a request lands, grab the next wd_target frames
         // verbatim (no arming, so the quiet noise floor is captured as-is), then dump
@@ -388,6 +413,19 @@ static void pipeline_task(void *arg)
             dac_buf[i * 2]     = (int32_t)local_buf[i * 2]     << 16;
             dac_buf[i * 2 + 1] = (int32_t)local_buf[i * 2 + 1] << 16;
         }
+        // Load accounting: compute time for this block (read-return to DAC
+        // hand-off; the blocking read/write are pacing, not load). The budget is
+        // the block's real-time length. Wavedump blocks are excluded -- the CSV
+        // printf stall is a deliberate bench action, not pipeline load.
+        if (wd_target == 0) {
+            uint32_t work_us   = (uint32_t)(esp_timer_get_time() - work_t0);
+            uint32_t budget_us = (uint32_t)((uint64_t)frames * 1000000u / 44100u);
+            s_ld_acc_us += work_us;
+            s_ld_blocks++;
+            if (work_us > s_ld_max_us) s_ld_max_us = work_us;
+            if (work_us > budget_us)   s_ld_over++;
+        }
+
         size_t dac_written = 0;
         (void)i2s_codec_write(dac_buf, frames * FRAME_BYTES, &dac_written, 100);
 

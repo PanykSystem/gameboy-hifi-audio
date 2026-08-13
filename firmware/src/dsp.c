@@ -43,9 +43,18 @@ static float s_btw_bass[2][2], s_btw_mid[2][2], s_btw_treble[2][2];
 // Noise-reduction filters on the local capture path (per-channel biquad state,
 // [0]=L [1]=R). Each is bypassed when its corner/center is 0 Hz; the notch is a
 // fixed deep null with tunable center + Q. Tuned per GBA via the `nr` command.
-static float s_nr_hpf[5], s_nr_lpf[5], s_nr_notch[5];
-static float s_nr_w_hpf[2][2], s_nr_w_lpf[2][2], s_nr_w_notch[2][2];
+//
+// The LPF is a Butterworth cascade of 1-3 biquad sections (order 2/4/6,
+// settings nr_lpf_order). At order 2 it is the historical gentle hiss
+// roll-off; the steeper orders act as a reconstruction filter for the GBA's
+// nearest-neighbor resampling: with the corner at the game's PCM Nyquist,
+// everything above is aliasing images, and a steeper cut approximates the
+// band-limited (sinc-like) result without touching program below the corner.
+#define NR_LPF_MAX_SECT 3
+static float s_nr_hpf[5], s_nr_lpf[NR_LPF_MAX_SECT][5], s_nr_notch[5];
+static float s_nr_w_hpf[2][2], s_nr_w_lpf[NR_LPF_MAX_SECT][2][2], s_nr_w_notch[2][2];
 static bool  s_nr_hpf_on, s_nr_lpf_on, s_nr_notch_on;
+static int   s_nr_lpf_sect = 1;   // active cascade sections (order / 2)
 
 // Downward expander / noise gate on the local path. Envelope from each block's
 // post-EQ RMS -- not peak: BLE TX bursts couple sub-ms clicks into the ADC that
@@ -74,7 +83,7 @@ static void (*s_gate_mute_cb)(bool) = NULL;  // notified on mute-state change
 // per-channel delay lines and its own smoothed expander gain, so the BT stream
 // filters/gates independently of the local speaker path. No amp-mute here: the
 // sink has its own amp, so gating the signal to silence is enough.
-static float s_bt_nr_w_hpf[2][2], s_bt_nr_w_lpf[2][2], s_bt_nr_w_notch[2][2];
+static float s_bt_nr_w_hpf[2][2], s_bt_nr_w_lpf[NR_LPF_MAX_SECT][2][2], s_bt_nr_w_notch[2][2];
 static float s_bt_gate_target = 1.0f;   // per-block target gain (linear)
 static float s_bt_gate_gain   = 1.0f;   // smoothed applied gain
 
@@ -210,10 +219,28 @@ static void maybe_recompute(void)
         dsps_biquad_gen_hpf_f32(s_nr_hpf, (float)s.nr_hpf_hz / PIPE_RATE, Q_SHELF);
     else { memset(s_nr_w_hpf, 0, sizeof(s_nr_w_hpf));
            memset(s_bt_nr_w_hpf, 0, sizeof(s_bt_nr_w_hpf)); }
-    if (s_nr_lpf_on)
-        dsps_biquad_gen_lpf_f32(s_nr_lpf, (float)s.nr_lpf_hz / PIPE_RATE, Q_SHELF);
-    else { memset(s_nr_w_lpf, 0, sizeof(s_nr_w_lpf));
-           memset(s_bt_nr_w_lpf, 0, sizeof(s_bt_nr_w_lpf)); }
+    if (s_nr_lpf_on) {
+        // Butterworth cascade: per-section Q sets from the standard pole
+        // placements (order 2/4/6). A section-count change re-uses sections
+        // whose delay lines may hold stale state from the last time that
+        // order ran; flush both paths' LPF state on the transition (one
+        // settings edit, one flush -- no audible click in practice).
+        static const float q1[1] = { 0.70710678f };
+        static const float q2[2] = { 0.54119610f, 1.30656296f };
+        static const float q3[3] = { 0.51763809f, 0.70710678f, 1.93185165f };
+        int sect = s.nr_lpf_order / 2;
+        if (sect < 1) sect = 1;
+        if (sect > NR_LPF_MAX_SECT) sect = NR_LPF_MAX_SECT;
+        const float *q = (sect == 1) ? q1 : (sect == 2) ? q2 : q3;
+        for (int k = 0; k < sect; k++)
+            dsps_biquad_gen_lpf_f32(s_nr_lpf[k], (float)s.nr_lpf_hz / PIPE_RATE, q[k]);
+        if (sect != s_nr_lpf_sect) {
+            memset(s_nr_w_lpf, 0, sizeof(s_nr_w_lpf));
+            memset(s_bt_nr_w_lpf, 0, sizeof(s_bt_nr_w_lpf));
+        }
+        s_nr_lpf_sect = sect;
+    } else { memset(s_nr_w_lpf, 0, sizeof(s_nr_w_lpf));
+             memset(s_bt_nr_w_lpf, 0, sizeof(s_bt_nr_w_lpf)); }
     if (s_nr_notch_on)
         dsps_biquad_gen_notch_f32(s_nr_notch, (float)s.nr_notch_hz / PIPE_RATE,
                                   -40.0f, (float)s.nr_notch_q);
@@ -303,8 +330,10 @@ void dsp_process_local(int16_t *stereo, size_t frames)
         dsps_biquad_f32(r, r, frames, s_nr_hpf, s_nr_w_hpf[1]);
     }
     if (s_nr_lpf_on) {
-        dsps_biquad_f32(l, l, frames, s_nr_lpf, s_nr_w_lpf[0]);
-        dsps_biquad_f32(r, r, frames, s_nr_lpf, s_nr_w_lpf[1]);
+        for (int k = 0; k < s_nr_lpf_sect; k++) {
+            dsps_biquad_f32(l, l, frames, s_nr_lpf[k], s_nr_w_lpf[k][0]);
+            dsps_biquad_f32(r, r, frames, s_nr_lpf[k], s_nr_w_lpf[k][1]);
+        }
     }
     if (s_nr_notch_on) {
         dsps_biquad_f32(l, l, frames, s_nr_notch, s_nr_w_notch[0]);
@@ -438,8 +467,10 @@ void dsp_process_bt(int16_t *stereo, size_t frames)
         dsps_biquad_f32(r, r, frames, s_nr_hpf, s_bt_nr_w_hpf[1]);
     }
     if (s_nr_lpf_on) {
-        dsps_biquad_f32(l, l, frames, s_nr_lpf, s_bt_nr_w_lpf[0]);
-        dsps_biquad_f32(r, r, frames, s_nr_lpf, s_bt_nr_w_lpf[1]);
+        for (int k = 0; k < s_nr_lpf_sect; k++) {
+            dsps_biquad_f32(l, l, frames, s_nr_lpf[k], s_bt_nr_w_lpf[k][0]);
+            dsps_biquad_f32(r, r, frames, s_nr_lpf[k], s_bt_nr_w_lpf[k][1]);
+        }
     }
     if (s_nr_notch_on) {
         dsps_biquad_f32(l, l, frames, s_nr_notch, s_bt_nr_w_notch[0]);

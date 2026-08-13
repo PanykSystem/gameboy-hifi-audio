@@ -5,6 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "esp_check.h"
 #include "esp_console.h"
 #include "esp_log.h"
@@ -400,8 +403,9 @@ static int cmd_nr(int argc, char **argv)
     gbhifi_settings_t s;
     settings_get(&s);
     if (argc == 1) {
-        printf("nr: hpf=%u Hz  lpf=%u Hz  notch=%u Hz (Q=%u)   (0 = off)\n",
-               s.nr_hpf_hz, s.nr_lpf_hz, s.nr_notch_hz, s.nr_notch_q);
+        printf("nr: hpf=%u Hz  lpf=%u Hz o%u (%u dB/oct)  notch=%u Hz (Q=%u)   (0 = off)\n",
+               s.nr_hpf_hz, s.nr_lpf_hz, s.nr_lpf_order, s.nr_lpf_order * 6,
+               s.nr_notch_hz, s.nr_notch_q);
         printf("nr gate: thresh=%d dBFS  range=%d dB%s\n",
                s.nr_gate_thresh_db, s.nr_gate_range_db, s.nr_gate_thresh_db < 0 ? "" : "  (off)");
         printf("nr btmute: %d dBFS%s   (BT-only hard mute)\n",
@@ -435,16 +439,21 @@ static int cmd_nr(int argc, char **argv)
     uint8_t  q   = s.nr_notch_q;
     if      (strcmp(argv[1], "off")   == 0) { hpf = lpf = notch = 0; settings_set_nr_gate(0, s.nr_gate_range_db); }
     else if (strcmp(argv[1], "hpf")   == 0 && argc >= 3) hpf   = (uint16_t)atoi(argv[2]);
-    else if (strcmp(argv[1], "lpf")   == 0 && argc >= 3) lpf   = (uint16_t)atoi(argv[2]);
+    else if (strcmp(argv[1], "lpf")   == 0 && argc >= 3) {
+        lpf = (uint16_t)atoi(argv[2]);
+        if (argc >= 4) settings_set_nr_lpf_order((uint8_t)atoi(argv[3]));
+    }
     else if (strcmp(argv[1], "notch") == 0 && argc >= 3) {
         notch = (uint16_t)atoi(argv[2]);
         if (argc >= 4) q = (uint8_t)atoi(argv[3]);
     } else {
-        printf("usage: nr | nr off | nr hpf <hz> | nr lpf <hz> | nr notch <hz> [q] | nr gate <dBFS> [range] | nr btmute <dBFS>\n");
+        printf("usage: nr | nr off | nr hpf <hz> | nr lpf <hz> [order 2|4|6] | nr notch <hz> [q] | nr gate <dBFS> [range] | nr btmute <dBFS>\n");
         return 1;
     }
     settings_set_nr(hpf, lpf, notch, q);
-    printf("nr: hpf=%u Hz  lpf=%u Hz  notch=%u Hz (Q=%u)\n", hpf, lpf, notch, q);
+    settings_get(&s);
+    printf("nr: hpf=%u Hz  lpf=%u Hz o%u (%u dB/oct)  notch=%u Hz (Q=%u)\n",
+           hpf, lpf, s.nr_lpf_order, s.nr_lpf_order * 6, notch, q);
     return 0;
 }
 
@@ -488,6 +497,15 @@ static int cmd_radio(int argc, char **argv)
         printf("BLE TX power %d dBm (snapped to 3 dB step)\n", atoi(argv[2]));
         return 0;
     }
+    if (argc == 3 && !strcmp(argv[1], "specms")) {
+        int ms = atoi(argv[2]);
+        if (ms <= 0) { printf("usage: radio specms <ms 20-1000>\n"); return 1; }
+        ble_config_set_spec_interval((uint16_t)ms);
+        printf("spectrum notify interval %u ms (~%u fps)\n",
+               ble_config_get_spec_interval(),
+               1000u / ble_config_get_spec_interval());
+        return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "btpwr")) {
         bt_a2d_set_tx_power_dbm(atoi(argv[2]));
         printf("BR/EDR TX power %d dBm (snapped to 3 dB step)\n", atoi(argv[2]));
@@ -501,7 +519,7 @@ static int cmd_radio(int argc, char **argv)
                on ? " (re-arm advertising with `radio ble on`)" : "");
         return 0;
     }
-    printf("usage: radio on|off | radio ble|bt|ctrl on|off | radio bleint <ms> | radio blepwr|btpwr <-12..9>\n");
+    printf("usage: radio on|off | radio ble|bt|ctrl on|off | radio bleint <ms> | radio blepwr|btpwr <-12..9> | radio specms <ms>\n");
     return 1;
 }
 
@@ -651,6 +669,86 @@ static int cmd_get(int argc, char **argv)
     return 0;
 }
 
+// `load`: audio-pipeline deadline diagnostics. Compute time per ~5.8 ms block
+// (I2S read-return to DAC hand-off) vs the real-time budget; `over` counts
+// blocks that blew the budget (each one starves the DMA and clicks). Counters
+// reset on read, so two calls bracket a test window.
+static int cmd_load(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    audio_load_t ld;
+    audio_pipeline_load_stats(&ld);
+    if (ld.blocks == 0) {
+        printf("load: no blocks since last read (pipeline parked? Mode A?)\n");
+        return 0;
+    }
+    printf("load: avg=%lu us  max=%lu us  budget=%lu us  (%lu%% avg, %lu%% peak)\n",
+           (unsigned long)ld.avg_us, (unsigned long)ld.max_us,
+           (unsigned long)ld.budget_us,
+           (unsigned long)(ld.avg_us * 100 / ld.budget_us),
+           (unsigned long)(ld.max_us * 100 / ld.budget_us));
+    printf("load: %lu blocks (%lu s), %lu over budget\n",
+           (unsigned long)ld.blocks,
+           (unsigned long)(ld.blocks * ld.budget_us / 1000000),
+           (unsigned long)ld.over);
+    return 0;
+}
+
+// `top`: per-task CPU share over a 1 s sample window (two uxTaskGetSystemState
+// snapshots, delta of each task's run-time counter). Percentages are of ONE
+// core's time; the two IDLE tasks show per-core headroom directly.
+#if configUSE_TRACE_FACILITY && configGENERATE_RUN_TIME_STATS
+#define TOP_MAX_TASKS 24
+static int cmd_top(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    static TaskStatus_t snap_a[TOP_MAX_TASKS], snap_b[TOP_MAX_TASKS];
+    configRUN_TIME_COUNTER_TYPE tot_a = 0, tot_b = 0;
+    UBaseType_t na = uxTaskGetSystemState(snap_a, TOP_MAX_TASKS, &tot_a);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    UBaseType_t nb = uxTaskGetSystemState(snap_b, TOP_MAX_TASKS, &tot_b);
+    if (na == 0 || nb == 0 || tot_b <= tot_a) {
+        printf("top: snapshot failed (tasks > %d?)\n", TOP_MAX_TASKS);
+        return 1;
+    }
+    // ulTotalRunTime is wall time (esp_timer us), so per-task deltas across both
+    // cores sum to ~2x it. "100%" = one core saturated; the task list totals
+    // ~200% with the two IDLE tasks showing per-core headroom.
+    configRUN_TIME_COUNTER_TYPE elapsed = tot_b - tot_a;
+    if (elapsed == 0) elapsed = 1;
+    printf("%-16s %4s %3s %9s %6s\n", "task", "core", "pri", "run us", "cpu%");
+    // Print in descending delta order: repeatedly pick the largest unprinted.
+    bool done[TOP_MAX_TASKS] = { false };
+    for (;;) {
+        int best = -1;
+        configRUN_TIME_COUNTER_TYPE best_d = 0;
+        for (UBaseType_t i = 0; i < nb; i++) {
+            if (done[i]) continue;
+            // Match by handle in the first snapshot; skip tasks born mid-window.
+            configRUN_TIME_COUNTER_TYPE d = 0;
+            for (UBaseType_t j = 0; j < na; j++) {
+                if (snap_a[j].xHandle == snap_b[i].xHandle) {
+                    d = snap_b[i].ulRunTimeCounter - snap_a[j].ulRunTimeCounter;
+                    break;
+                }
+            }
+            if (best < 0 || d > best_d) { best = (int)i; best_d = d; }
+        }
+        if (best < 0) break;
+        done[best] = true;
+        char core[4] = "any";
+        if (snap_b[best].xCoreID == 0 || snap_b[best].xCoreID == 1)
+            snprintf(core, sizeof(core), "%d", (int)snap_b[best].xCoreID);
+        printf("%-16s %4s %3u %9lu %5lu%%\n",
+               snap_b[best].pcTaskName, core,
+               (unsigned)snap_b[best].uxCurrentPriority,
+               (unsigned long)best_d,
+               (unsigned long)(best_d * 100 / elapsed));
+    }
+    return 0;
+}
+#endif
+
 // `heap`: free-heap readout for debugging RAM pressure (e.g. BLE + A2DP
 // coexistence). Internal is the DMA-capable pool the BT stack allocates from.
 static int cmd_heap(int argc, char **argv)
@@ -686,8 +784,8 @@ static void register_cmds(void)
         { .command = "hold",  .help = "R-button hold thresholds (ms): hold [connect pair mode exit]", .func = cmd_hold },
         { .command = "wheel", .help = "VOL wheel drives volume: wheel on|off",  .func = cmd_wheel },
         { .command = "batt",  .help = "Battery meter / chemistry: batt [alkaline|nimh|lipo]", .func = cmd_batt },
-        { .command = "nr",    .help = "Noise reduction: nr | hpf|lpf|notch <hz> [q] | gate <dBFS> [range] | btmute <dBFS>", .func = cmd_nr },
-        { .command = "radio", .help = "RF bench controls: radio on|off | ble|bt on|off | bleint <ms> | blepwr|btpwr <dBm>", .func = cmd_radio },
+        { .command = "nr",    .help = "Noise reduction: nr | hpf <hz> | lpf <hz> [order] | notch <hz> [q] | gate <dBFS> [range] | btmute <dBFS>", .func = cmd_nr },
+        { .command = "radio", .help = "RF bench controls: radio on|off | ble|bt on|off | bleint <ms> | blepwr|btpwr <dBm> | specms <ms>", .func = cmd_radio },
         { .command = "pm",    .help = "Power bench controls: pm dfs on|off",       .func = cmd_pm },
         { .command = "wavedump",.help = "Capture ADC samples for analysis: wavedump [n]", .func = cmd_wavedump },
         { .command = "outvol",.help = "Mode A analog volume (HP+spk drivers): outvol <0-100>", .func = cmd_outvol },
@@ -696,6 +794,10 @@ static void register_cmds(void)
         { .command = "ls",    .help = "List the clip store",                     .func = cmd_ls },
         { .command = "save",  .help = "Persist settings to NVS",                 .func = cmd_save },
         { .command = "get",   .help = "Show current settings",                   .func = cmd_get },
+        { .command = "load",  .help = "Audio task deadline stats: compute us/block vs budget", .func = cmd_load },
+#if configUSE_TRACE_FACILITY && configGENERATE_RUN_TIME_STATS
+        { .command = "top",   .help = "Per-task CPU share over a 1 s window",    .func = cmd_top },
+#endif
         { .command = "heap",  .help = "Show free heap (debug RAM pressure)",     .func = cmd_heap },
         { .command = "diag",  .help = "Install diagnostics: VBAT/VOL/PAIR/HP harness check", .func = cmd_diag },
     };
