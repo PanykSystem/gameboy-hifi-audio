@@ -345,6 +345,11 @@
   .card-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.85rem; }
   .card-head h2 { font-size: 0.95rem; font-weight: 600; color: var(--ink); flex: 1 1 auto; }
   .card-head .hint { font-family: var(--font-mono); font-size: 0.72rem; color: var(--faint); }
+  .card-head output.hint { color: var(--signal); }
+  .lpf-scale { display: flex; justify-content: space-between; margin-top: 0.35rem;
+               font-family: var(--font-mono); font-size: 0.68rem; color: var(--faint);
+               text-transform: uppercase; letter-spacing: 0.11em; }
+  #lpfCard.unsupported .ctl { opacity: 0.45; }
 
   /* ---- slider control ---- */
   .ctl { margin-block: 0.7rem; }
@@ -717,6 +722,20 @@
               </div>
             </div>
           </div>
+
+          <div class="card" id="lpfCard" style="margin-top:1rem">
+            <div class="card-head"><h2>Smoothing filter</h2><output class="hint" id="lpfO"></output></div>
+            <p class="note" style="margin-bottom:0.7rem">Most GBA games play their music at a low
+              sample rate, which adds a fizzy edge. This filter removes it. <b>Standard</b> fits most
+              games. Higher settings cut more fizz but sound duller. Applies to every output.</p>
+            <div class="ctl">
+              <div class="ctl-head"><label for="lpfSlider">Smoothing</label></div>
+              <input type="range" id="lpfSlider" min="0" max="5" step="1">
+              <div class="lpf-scale"><span>Off</span><span>Max</span></div>
+            </div>
+            <p class="note" id="lpfNote" hidden>Needs a firmware update. Use the update card on the
+              System tab.</p>
+          </div>
         </section>
 
         <!-- ---------- DEVICE ---------- -->
@@ -912,7 +931,8 @@ const banner = (m) => { const b = $('banner'); b.textContent = m; b.classList.ad
 //   [28] startupMode (0=modern 1=original 2=custom 3=off) [29] customClip (read-only)
 //   [30] battChem (0=alkaline 1=nimh 2=lipo-reg)
 //   [31..32] battVbat u16 mV (read-only) [33] battBand (read-only) [34] battPct 0..100/0xFF (read-only)
-//   [35..63] reserved
+//   [35..36] nrLpfHz u16 (smoothing filter corner, 0=off; v14+) [37] nrLpfOrder (2/4/6; v14+)
+//   [38..63] reserved
 const FIELDS = [   // writable u8 ('u') / i8 ('i') / bool ('b')
   ['spkVol',2,'u'], ['btVol',3,'u'],
   ['eqEn',4,'b'], ['eqBass',5,'i'], ['eqMid',6,'i'], ['eqTreble',7,'i'],
@@ -924,6 +944,45 @@ const FIELDS = [   // writable u8 ('u') / i8 ('i') / bool ('b')
 const HOLD_FIELDS = [   // writable u16 ('h')
   ['holdConnect',16], ['holdPair',18], ['holdMode',20], ['holdExit',22],
 ];
+
+// ---- smoothing filter (reconstruction low-pass, bytes 35..37, settings v14+) ----
+// One slider from least to most impact. Each stop is a (corner Hz, Butterworth
+// order) preset; the wire carries the true values so the UART console and this
+// page stay consistent. A console-tuned custom value snaps the slider to the
+// nearest stop for display but is preserved verbatim in writes until the user
+// actually moves the slider.
+const LPF_STOPS = [
+  { hz: 0,     o: 6, label: 'Off'      },
+  { hz: 10500, o: 2, label: 'Minimal'  },
+  { hz: 8000,  o: 4, label: 'Light'    },
+  { hz: 6700,  o: 6, label: 'Standard' },
+  { hz: 5250,  o: 6, label: 'Strong'   },
+  { hz: 4200,  o: 6, label: 'Max'      },
+];
+let lpfRaw = { hz: 6700, o: 6 };   // device truth, or the chosen stop after a user move
+let lpfSupported = false;
+
+function lpfNearestStop(hz) {
+  if (!hz) return 0;
+  let best = 1;
+  for (let i = 2; i < LPF_STOPS.length; i++)
+    if (Math.abs(LPF_STOPS[i].hz - hz) < Math.abs(LPF_STOPS[best].hz - hz)) best = i;
+  return best;
+}
+
+function lpfRender() {
+  const stop  = LPF_STOPS[parseInt($('lpfSlider').value)];
+  const exact = lpfRaw.hz === stop.hz && lpfRaw.o === stop.o;
+  $('lpfO').value = !lpfRaw.hz ? 'Off'
+    : `${exact ? stop.label : 'Custom'} · ${(lpfRaw.hz / 1000).toFixed(1)} kHz`;
+}
+
+$('lpfSlider').addEventListener('input', () => {
+  const s = LPF_STOPS[parseInt($('lpfSlider').value)];
+  lpfRaw = { hz: s.hz, o: s.o };
+  lpfRender();
+  onControlInput();
+});
 
 function decodeToControls(dv) {
   clearTimeout(wTimer);   // a fresh device value supersedes any queued write
@@ -938,6 +997,20 @@ function decodeToControls(dv) {
   }
   for (const [id, off] of HOLD_FIELDS) {
     if (off + 1 < dv.byteLength) $(id).value = dv.getUint16(off, true);
+  }
+  // Smoothing filter: gate on the settings version, not just blob length --
+  // v13 firmware also sends 64 bytes with the tail zeroed, which would read as
+  // a false "Off" here.
+  lpfSupported = dv.byteLength > 37 && dv.getUint16(0, true) >= 14;
+  $('lpfCard').classList.toggle('unsupported', !lpfSupported);
+  $('lpfSlider').disabled = !lpfSupported;
+  $('lpfNote').hidden = lpfSupported;
+  if (lpfSupported) {
+    lpfRaw = { hz: dv.getUint16(35, true), o: dv.getUint8(37) };
+    $('lpfSlider').value = lpfNearestStop(lpfRaw.hz);
+    lpfRender();
+  } else {
+    $('lpfO').value = '';
   }
   lastModeA = dv.getUint8(14);
   // Byte 29 is read-only status: whether /clips/startup-custom.gsfx exists.
@@ -962,6 +1035,10 @@ function encodeFromControls() {
   }
   dv.setUint8(14, lastModeA);                      // read-only: preserved, firmware ignores it
   for (const [id, off] of HOLD_FIELDS) dv.setUint16(off, parseInt($(id).value) || 0, true);
+  // Smoothing filter: always encoded; firmware older than v14 ignores bytes past
+  // its parser, so this is harmless on old devices.
+  dv.setUint16(35, lpfRaw.hz, true);
+  dv.setUint8(37, lpfRaw.o);
   return buf;
 }
 
