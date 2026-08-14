@@ -58,10 +58,21 @@ void harness_set_change_cb(harness_change_cb_t cb)
 
 static void sample_task(void *arg)
 {
-    // Last states published to the subscriber. Seeded out of range so the first
-    // evaluation always counts as a change.
-    harness_state_t last[HARNESS_SIG_COUNT];
-    for (int i = 0; i < HARNESS_SIG_COUNT; i++) last[i] = (harness_state_t)0xFF;
+    // Debounced change detection: a new state is published only once TWO
+    // consecutive samples agree on it. A single odd sample -- a transient ADC
+    // read failure, a glitch caught mid-edge -- used to flip up to three states
+    // at once for exactly one second (VBAT "unavailable" also flips installed,
+    // which reclassifies HP), and every flip notified the web diag card: the
+    // "flashing warnings". Real conditions persist and still get through, one
+    // sample period later. `published` is what the subscriber last saw; `prev`
+    // is the previous evaluation. Both seeded out of range so the first stable
+    // report publishes.
+    harness_state_t published[HARNESS_SIG_COUNT];
+    harness_state_t prev[HARNESS_SIG_COUNT];
+    for (int i = 0; i < HARNESS_SIG_COUNT; i++) {
+        published[i] = (harness_state_t)0xFF;
+        prev[i]      = (harness_state_t)0xFF;
+    }
 
     for (;;) {
         bool low = (gpio_get_level(PIN_CP_BUTTON) == 0);
@@ -79,8 +90,12 @@ static void sample_task(void *arg)
             harness_eval(&rep);
             bool changed = false;
             for (int i = 0; i < HARNESS_SIG_COUNT; i++) {
-                if (rep.sig[i].state != last[i]) { changed = true; }
-                last[i] = rep.sig[i].state;
+                harness_state_t cur = rep.sig[i].state;
+                if (cur == prev[i] && cur != published[i]) {
+                    published[i] = cur;
+                    changed = true;
+                }
+                prev[i] = cur;
             }
             if (changed) s_change_cb(&rep);
         }

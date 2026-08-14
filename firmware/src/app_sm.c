@@ -279,8 +279,28 @@ static void pam_init(void)
 // output drivers over I2C. Read on the ~200 ms poll, applied only on a change of
 // at least the hysteresis band so it doesn't churn settings / spam the I2C bus.
 
+// The shared ADC1 unit has four readers: the wheel poll task, the harness
+// sampler, the battery meter, and on-demand diag/console reads. adc_oneshot_read
+// is thread-safe only in the sense that it FAILS (ESP_ERR_TIMEOUT) when another
+// read holds the unit -- a collision made a whole oversample burst return -1,
+// which the install check classified as "ADC unavailable" and (via installed=
+// false) escalated HP to "sense line open" for one sample: the flashing warnings
+// on the web diag card. Serialize all bursts through one mutex instead; a burst
+// is ~16 quick conversions, so waiting is cheap and a real wedge still bails via
+// the timeout.
+#define ADC_LOCK_TIMEOUT_MS 100
+static SemaphoreHandle_t s_adc_lock = NULL;
+
+static bool adc_lock(void)
+{
+    return s_adc_lock &&
+           xSemaphoreTake(s_adc_lock, pdMS_TO_TICKS(ADC_LOCK_TIMEOUT_MS)) == pdTRUE;
+}
+static void adc_unlock(void) { xSemaphoreGive(s_adc_lock); }
+
 static void vol_adc_init(void)
 {
+    if (!s_adc_lock) s_adc_lock = xSemaphoreCreateMutex();
     if (s_vol_adc) return;   // already primed early (app_sm_prime_volume); ADC1
                              // unit can only be created once, re-creating errors.
     adc_oneshot_unit_init_cfg_t unit_cfg = { .unit_id = ADC_UNIT_1 };
@@ -322,12 +342,17 @@ static void vol_adc_init(void)
 static int vol_read_raw(void)
 {
     if (!s_vol_adc) return -1;
+    if (!adc_lock()) return -1;
     int acc = 0;
     for (int i = 0; i < VOL_OVERSAMPLE; i++) {
         int raw = 0;
-        if (adc_oneshot_read(s_vol_adc, VOL_ADC_CHANNEL, &raw) != ESP_OK) return -1;
+        if (adc_oneshot_read(s_vol_adc, VOL_ADC_CHANNEL, &raw) != ESP_OK) {
+            adc_unlock();
+            return -1;
+        }
         acc += raw;
     }
+    adc_unlock();
     return acc / VOL_OVERSAMPLE;
 }
 
@@ -393,12 +418,17 @@ void app_sm_vol_wheel_read(int *raw_out, int *pct_out)
 int app_sm_read_vbat_mv(void)
 {
     if (!s_vol_adc || !s_adc1_cali) return -1;
+    if (!adc_lock()) return -1;
     int acc = 0;
     for (int i = 0; i < VBAT_OVERSAMPLE; i++) {
         int raw = 0;
-        if (adc_oneshot_read(s_vol_adc, VBAT_ADC_CHANNEL, &raw) != ESP_OK) return -1;
+        if (adc_oneshot_read(s_vol_adc, VBAT_ADC_CHANNEL, &raw) != ESP_OK) {
+            adc_unlock();
+            return -1;
+        }
         acc += raw;
     }
+    adc_unlock();
     int sense_mv = 0;
     if (adc_cali_raw_to_voltage(s_adc1_cali, acc / VBAT_OVERSAMPLE, &sense_mv) != ESP_OK) {
         return -1;
