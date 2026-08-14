@@ -58,11 +58,20 @@ void ble_config_set_advertising(bool on);
 // amplitude the TX power). Not persisted; defaults return on reboot.
 void ble_config_set_adv_interval_ms(uint32_t ms);
 void ble_config_set_tx_power_dbm(int dbm);
-// Spectrum notify interval (ms, clamped 20..1000; default ~50 = 20 fps). Each
-// notify is a radio TX burst; longer intervals mean fewer supply transients
-// while the web visualizer streams. Bench knob (`radio specms`), not persisted.
+// Spectrum notify interval (ms, clamped 20..1000; default ~50 = 20 fps). This
+// is the FRAME cadence, not the notify cadence: frames are batched (below), so
+// it sets the visualizer's frame rate, not the radio burst rate. Bench knob
+// (`radio specms`), not persisted.
 void ble_config_set_spec_interval(uint16_t ms);
 uint16_t ble_config_get_spec_interval(void);
+// Spectrum frames per notify (1..7, default 7; clamped down to what the
+// negotiated MTU fits). Each notify is one radio TX burst whose supply
+// transient couples an audible click into the codec, so batching N frames into
+// one burst cuts the click rate ~N-fold at the same frame rate -- the web app
+// paces the batch back out at the frame interval. 1 restores the old
+// frame-per-notify behaviour. Bench knob (`radio specbatch`), not persisted.
+void ble_config_set_spec_batch(uint8_t frames);
+uint8_t ble_config_get_spec_batch(void);
 
 #ifdef __cplusplus
 }

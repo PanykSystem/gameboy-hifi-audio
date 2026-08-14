@@ -461,7 +461,9 @@ static int cmd_nr(int argc, char **argv)
 // (BT inquiry/paging + BLE advertising); `ble`/`bt` split them so the two
 // periodic-noise sources can be isolated; `bleint`/`blepwr` change the BLE
 // advertising cadence/energy so a rail-coupled click can be fingerprinted
-// (its rate should track bleint, its level blepwr). None of these persist.
+// (its rate should track bleint, its level blepwr); `specms`/`specbatch` trade
+// visualizer frame rate and lag against the connected-state click rate (one
+// click per notify burst). None of these persist.
 static int cmd_radio(int argc, char **argv)
 {
     if (argc == 2 && (!strcmp(argv[1], "on") || !strcmp(argv[1], "off"))) {
@@ -501,9 +503,19 @@ static int cmd_radio(int argc, char **argv)
         int ms = atoi(argv[2]);
         if (ms <= 0) { printf("usage: radio specms <ms 20-1000>\n"); return 1; }
         ble_config_set_spec_interval((uint16_t)ms);
-        printf("spectrum notify interval %u ms (~%u fps)\n",
+        printf("spectrum frame interval %u ms (~%u fps), one notify per %u frames\n",
                ble_config_get_spec_interval(),
-               1000u / ble_config_get_spec_interval());
+               1000u / ble_config_get_spec_interval(),
+               ble_config_get_spec_batch());
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "specbatch")) {
+        int n = atoi(argv[2]);
+        if (n <= 0) { printf("usage: radio specbatch <frames 1-7>\n"); return 1; }
+        ble_config_set_spec_batch((uint8_t)n);
+        unsigned b = ble_config_get_spec_batch(), ms = ble_config_get_spec_interval();
+        printf("spectrum batch %u frames/notify: ~%u bursts/s, %u ms visualizer lag\n",
+               b, 1000u / (b * ms), b * ms);
         return 0;
     }
     if (argc == 3 && !strcmp(argv[1], "btpwr")) {
@@ -519,7 +531,7 @@ static int cmd_radio(int argc, char **argv)
                on ? " (re-arm advertising with `radio ble on`)" : "");
         return 0;
     }
-    printf("usage: radio on|off | radio ble|bt|ctrl on|off | radio bleint <ms> | radio blepwr|btpwr <-12..9> | radio specms <ms>\n");
+    printf("usage: radio on|off | radio ble|bt|ctrl on|off | radio bleint <ms> | radio blepwr|btpwr <-12..9> | radio specms <ms> | radio specbatch <1-7>\n");
     return 1;
 }
 
@@ -803,7 +815,7 @@ static void register_cmds(void)
         { .command = "wheel", .help = "VOL wheel drives volume: wheel on|off",  .func = cmd_wheel },
         { .command = "batt",  .help = "Battery meter / chemistry: batt [alkaline|nimh|lipo]", .func = cmd_batt },
         { .command = "nr",    .help = "Noise reduction: nr | hpf <hz> | lpf <hz> [order] | notch <hz> [q] | gate <dBFS> [range] | btmute <dBFS>", .func = cmd_nr },
-        { .command = "radio", .help = "RF bench controls: radio on|off | ble|bt on|off | bleint <ms> | blepwr|btpwr <dBm> | specms <ms>", .func = cmd_radio },
+        { .command = "radio", .help = "RF bench controls: radio on|off | ble|bt on|off | bleint <ms> | blepwr|btpwr <dBm> | specms <ms> | specbatch <frames>", .func = cmd_radio },
         { .command = "pm",    .help = "Power bench controls: pm dfs on|off | pm freq 80|160|240", .func = cmd_pm },
         { .command = "wavedump",.help = "Capture ADC samples for analysis: wavedump [n]", .func = cmd_wavedump },
         { .command = "outvol",.help = "Mode A analog volume (HP+spk drivers): outvol <0-100>", .func = cmd_outvol },

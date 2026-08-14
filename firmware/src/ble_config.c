@@ -192,14 +192,27 @@ enum {
 
 // ---- audio spectrum (web visualizer) --------------------------------------
 // SPECTRUM (notify): a stereo bar spectrum of the live audio the user is hearing,
-// streamed at ~20 fps while a client is subscribed. Payload byte 0 is the source
-// (0 = speaker, 1 = Bluetooth, 2 = headphone), then SPEC_BINS left bytes and SPEC_BINS
-// right bytes (0..255 each). Gated on the CCCD: the audio-side FFT tap only runs
-// while someone is watching. The notify rate does NOT set the rev 1 click rate:
-// radio bursts happen per connection event (config_link_quiet), and frames
-// queued between events ride the same burst, so full frame rate costs nothing.
-#define SPEC_BINS         32    // bands per channel (payload = 1 + 2 * SPEC_BINS)
-#define SPEC_INTERVAL_MS  50    // ~20 fps
+// streamed at ~20 fps while a client is subscribed. A frame is: byte 0 = source
+// (0 = speaker, 1 = Bluetooth, 2 = headphone), then SPEC_BINS left bytes and
+// SPEC_BINS right bytes (0..255 each). Gated on the CCCD: the audio-side FFT tap
+// only runs while someone is watching.
+//
+// One notify per frame is what made the visualizer audible on rev 1: measured on
+// the bench (2026-08-14, 1 kHz square out the HP jack into a line input), clicks
+// arrive one per connection event -- 15/s at the config_link_quiet interval,
+// peaking only ~9 dB below program. Every event carries a frame at 20 fps, so
+// slave latency never gets to skip one. Batching SPEC_BATCH_DEF frames into a
+// single notify leaves the frame rate alone but makes most events empty, and the
+// central then honours the latency and skips them: bursts drop to the batch rate.
+// Frames stay fixed-length and self-contained so a batch is a plain
+// concatenation; the web app queues them and paces playback at SPEC_INTERVAL_MS.
+#define SPEC_BINS         32    // bands per channel
+#define SPEC_FRAME_LEN    (1 + 2 * SPEC_BINS)   // 65 bytes on the wire
+#define SPEC_INTERVAL_MS  50    // frame cadence, ~20 fps
+#define SPEC_BATCH_MAX    7     // 7 * 65 = 455 <= 517-3, the max ATT payload
+#define SPEC_BATCH_DEF    7     // one burst per 350 ms (~3/s); 350 ms of lag is
+                                // not visible on a bar spectrum (bench listen
+                                // test 2026-08-14 preferred it over 4)
 
 // Attribute-table indices.
 enum {
@@ -328,13 +341,14 @@ static const esp_gatts_attr_db_t k_gatt_db[IDX_NB] = {
          BLE_CMD_VAL_MAX, sizeof(s_ota_attr_dummy), &s_ota_attr_dummy} },
 
     // SPECTRUM characteristic: notify-only stereo bar spectrum + CCCD. Notified
-    // from ble_spec_task at ~20 fps while subscribed; never read/written.
+    // from ble_spec_task while subscribed; never read/written. Max length holds a
+    // full SPEC_BATCH_MAX batch (the notify is rejected if it exceeds this).
     [IDX_SPEC_DECL] = { {ESP_GATT_AUTO_RSP},
         {ESP_UUID_LEN_16, (uint8_t *)&k_char_decl_uuid, ESP_GATT_PERM_READ,
          sizeof(uint8_t), sizeof(uint8_t), (uint8_t *)&k_prop_n} },
     [IDX_SPEC_VAL] = { {ESP_GATT_AUTO_RSP},
         {ESP_UUID_LEN_128, (uint8_t *)SPEC_UUID128, ESP_GATT_PERM_READ,
-         1 + 2 * SPEC_BINS, sizeof(s_ota_attr_dummy), &s_ota_attr_dummy} },
+         SPEC_FRAME_LEN * SPEC_BATCH_MAX, sizeof(s_ota_attr_dummy), &s_ota_attr_dummy} },
     [IDX_SPEC_CCCD] = { {ESP_GATT_AUTO_RSP},
         {ESP_UUID_LEN_16, (uint8_t *)&k_cccd_uuid,
          ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
@@ -588,19 +602,28 @@ static void ota_cleanup(bool fire_cb)
 // Every BLE connection event is a radio TX burst even when no data moves, and on
 // rev 1 boards each burst couples an audible click into the codec's analog
 // supply. Linux/Chrome centrals default to a 7.5-15 ms interval (66-133
-// bursts/s -- a continuous buzz); at 50-60 ms the burst rate caps near the
-// spectrum frame rate (~17-20/s), so the visualizer keeps its full 20 fps and
-// EQ writes still land within one interval, while the click density drops
-// 3-6x. Slave latency only lets us skip events we have nothing to send in, so
-// it quiets the idle page further (~4-5 bursts/s) without slowing anything
-// active. OTA re-requests the fast 15-30 ms link on BEGIN (ota_widen_link) and
-// we restore this one if the transfer aborts.
+// bursts/s -- a continuous buzz); at 50-60 ms the burst rate drops 3-6x while EQ
+// writes still land within one interval. Slave latency only lets us skip events
+// we have nothing to send in, so it quiets the idle page further without slowing
+// anything active.
+//
+// While the visualizer streams we go slower still (90-105 ms). Latency 3 caps
+// the idle burst rate at one per (1+latency)*max_int, i.e. 4/s on the 60 ms link
+// -- which would bound how much the frame batching in ble_spec_task can buy. At
+// 105 ms that floor is 2.4/s, below the batch rate at any setting, so the batch
+// is what sets the click rate. The peripheral still listens on every event it
+// transmits in, so a write from the page is picked up within one batch period
+// (~350 ms at the defaults), not (1+latency) intervals.
+//
+// OTA re-requests the fast 15-30 ms link on BEGIN (ota_widen_link) and we
+// restore this one if the transfer aborts.
 static void config_link_quiet(void)
 {
+    bool streaming = s_spec_notify_on;
     esp_ble_conn_update_params_t p = {0};
     memcpy(p.bda, s_peer_bda, sizeof(esp_bd_addr_t));
-    p.min_int = 40;    // 50 ms (1.25 ms units)
-    p.max_int = 48;    // 60 ms
+    p.min_int = streaming ? 72 : 40;   // 90 ms : 50 ms (1.25 ms units)
+    p.max_int = streaming ? 84 : 48;   // 105 ms : 60 ms
     p.latency = 3;     // skip up to 3 empty events
     p.timeout = 600;   // 6 s (10 ms units), >> (1+latency)*max_int
     esp_err_t e = esp_ble_gap_update_conn_params(&p);
@@ -1014,19 +1037,21 @@ static void ble_cmd_task(void *arg)
     }
 }
 
-// Spectrum notify interval, runtime-tunable (bench: `radio specms <ms>`, not
-// persisted). Every notify is a radio TX burst whose supply transient can
-// couple into the ADC capture as an audible click, so the interval is the knob
-// that trades visualizer frame rate against click density while the web card
-// is open. Default SPEC_INTERVAL_MS (~20 fps).
+// Spectrum frame interval + frames per notify, runtime-tunable (bench: `radio
+// specms <ms>` / `radio specbatch <n>`, neither persisted). specms sets how
+// often a frame is computed (the visualizer's frame rate); specbatch sets how
+// many frames ride one notify, and since a notify is what forces a radio TX
+// burst, it is the knob that trades visualizer latency (batch x interval) for
+// click density. Defaults: 50 ms x 7 = one burst per 350 ms at 20 fps.
 static volatile uint16_t s_spec_interval_ms = SPEC_INTERVAL_MS;
+static volatile uint8_t  s_spec_batch       = SPEC_BATCH_DEF;
 
 void ble_config_set_spec_interval(uint16_t ms)
 {
     if (ms < 20)   ms = 20;
     if (ms > 1000) ms = 1000;
     s_spec_interval_ms = ms;
-    ESP_LOGI(TAG, "spectrum notify interval %u ms", ms);
+    ESP_LOGI(TAG, "spectrum frame interval %u ms", ms);
 }
 
 uint16_t ble_config_get_spec_interval(void)
@@ -1034,24 +1059,66 @@ uint16_t ble_config_get_spec_interval(void)
     return s_spec_interval_ms;
 }
 
-// Compute + notify the stereo audio spectrum at ~20 fps while a client watches.
-// The FFT (audio_pipeline_compute_spectrum) runs here, not in the audio task.
+void ble_config_set_spec_batch(uint8_t frames)
+{
+    if (frames < 1)              frames = 1;
+    if (frames > SPEC_BATCH_MAX) frames = SPEC_BATCH_MAX;
+    s_spec_batch = frames;
+    ESP_LOGI(TAG, "spectrum batch %u frames/notify", frames);
+}
+
+uint8_t ble_config_get_spec_batch(void)
+{
+    return s_spec_batch;
+}
+
+// How many frames we may actually pack right now. The batch has to fit one
+// notify PDU (ATT payload = MTU - 3); a central that negotiated a small MTU just
+// gets smaller batches (and more clicks) rather than dropped notifies.
+static int spec_batch_frames(void)
+{
+    int fit = (s_mtu > 3) ? (s_mtu - 3) / SPEC_FRAME_LEN : 1;
+    if (fit < 1) fit = 1;
+    int want = s_spec_batch;
+    if (want > fit) want = fit;
+    return want;
+}
+
+// Compute the stereo audio spectrum at the frame interval while a client
+// watches, and notify once per batch of frames. The FFT
+// (audio_pipeline_compute_spectrum) runs here, not in the audio task.
 static void ble_spec_task(void *arg)
 {
     (void)arg;
-    uint8_t frame[1 + 2 * SPEC_BINS];   // [0]=source (0 speaker, 1 BT, 2 headphone), then L bands, R bands
+    uint8_t batch[SPEC_FRAME_LEN * SPEC_BATCH_MAX];
+    int filled = 0;   // frames staged in batch[]
     for (;;) {
         // Skip while nobody's watching, and yield to audio when heap is tight so
-        // the visualizer can never starve an active A2DP stream.
+        // the visualizer can never starve an active A2DP stream. Staged frames
+        // are stale by the time anyone watches again, so drop them.
         if (!(s_connected && s_spec_notify_on) || !ble_heap_ok()) {
+            filled = 0;
             vTaskDelay(pdMS_TO_TICKS(150));
             continue;
         }
-        int n = audio_pipeline_compute_spectrum(frame + 1, SPEC_BINS);
-        if (n > 0) {
-            frame[0] = audio_pipeline_spectrum_is_bt() ? 1 : (app_sm_hp_plugged() ? 2 : 0);
+        int want = spec_batch_frames();
+        if (filled >= want) {   // knob (or MTU) shrank under a staged batch
             esp_ble_gatts_send_indicate(s_gatts_if, s_conn_id, s_handles[IDX_SPEC_VAL],
-                                        (uint16_t)(1 + n), frame, false /* notify */);
+                                        (uint16_t)(filled * SPEC_FRAME_LEN), batch,
+                                        false /* notify */);
+            filled = 0;
+        }
+        uint8_t *frame = batch + filled * SPEC_FRAME_LEN;
+        // Always a full frame or nothing: compute_spectrum returns 2*nbins, or 0
+        // when the tap is off. A short frame would desync the concatenation.
+        if (audio_pipeline_compute_spectrum(frame + 1, SPEC_BINS) == 2 * SPEC_BINS) {
+            frame[0] = audio_pipeline_spectrum_is_bt() ? 1 : (app_sm_hp_plugged() ? 2 : 0);
+            if (++filled >= want) {
+                esp_ble_gatts_send_indicate(s_gatts_if, s_conn_id, s_handles[IDX_SPEC_VAL],
+                                            (uint16_t)(filled * SPEC_FRAME_LEN), batch,
+                                            false /* notify */);
+                filled = 0;
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(s_spec_interval_ms));
     }
@@ -1351,9 +1418,14 @@ static void gatts_cb(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
             }
         } else if (param->write.handle == s_handles[IDX_SPEC_CCCD]) {
             if (param->write.len >= 2) {
-                s_spec_notify_on = (param->write.value[0] & 0x01) != 0;
-                audio_pipeline_spectrum_enable(s_spec_notify_on);  // gate the FFT tap
-                ESP_LOGI(TAG, "spectrum %s", s_spec_notify_on ? "on" : "off");
+                bool on = (param->write.value[0] & 0x01) != 0;
+                bool changed = (on != s_spec_notify_on);
+                s_spec_notify_on = on;
+                audio_pipeline_spectrum_enable(on);   // gate the FFT tap
+                ESP_LOGI(TAG, "spectrum %s", on ? "on" : "off");
+                // Streaming and idle want different link params (see
+                // config_link_quiet); don't re-ask mid-OTA, ota_cleanup restores.
+                if (changed && !(s_ota_active || s_ota_pending)) config_link_quiet();
             }
         } else if (param->write.handle == s_handles[IDX_DIAG_CCCD]) {
             if (param->write.len >= 2) {
