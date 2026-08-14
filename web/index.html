@@ -1360,16 +1360,72 @@ function crc32(buf) {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
+// ---- firmware image pre-flight --------------------------------------------
+// Refuse a file the device would refuse anyway, before spending a minute
+// sending it over Bluetooth with the audio stopped. Everything checked here is
+// read from the ESP32 image header and the app descriptor behind it:
+//   [0x00]      image magic 0xE9
+//   [0x20] u32  app-descriptor magic 0xABCD5432
+//   [0x30] char[32] version
+//   [0x50] char[32] project name
+// The project name is the same field the device's own identity gate compares
+// (ota_handle_end in firmware/src/ble_config.c), so this only ever rejects an
+// image the device would reject too -- it just does it in the file picker
+// instead of at the end of the transfer. Keep PROJECT_NAME in lockstep with
+// project() in firmware/CMakeLists.txt.
+const ESP_IMAGE_MAGIC = 0xe9, ESP_APP_DESC_MAGIC = 0xabcd5432;
+const APP_SLOT_BYTES  = 0x200000;            // ota_0 / ota_1 size in firmware/partitions.csv
+const PROJECT_NAME    = 'gameboy-hifi-audio';
+
+// NUL-terminated fixed-width string out of the image.
+function imageStr(buf, off, len) {
+  const u = new Uint8Array(buf, off, len);
+  const end = u.indexOf(0);
+  return new TextDecoder().decode(end < 0 ? u : u.subarray(0, end));
+}
+// Strings pulled out of an arbitrary file reach log(), which builds HTML. Keep
+// only the characters a project name or version can legitimately contain.
+const safeStr = (s) => s.replace(/[^\w.+-]/g, '');
+
+// null when the image looks flashable, else the reason to show the user.
+function fwImageProblem(buf) {
+  if (buf.byteLength < 0x70) return 'That file is too small to be a firmware image.';
+  const dv = new DataView(buf);
+  if (dv.getUint8(0) === 0xff)
+    return 'That looks like the full-flash image, which only goes onto a blank board over a '
+         + 'cable. To update over Bluetooth use firmware.bin from the same release.';
+  if (dv.getUint8(0) !== ESP_IMAGE_MAGIC)
+    return 'That is not an ESP32 firmware image.';
+  if (dv.getUint32(0x20, true) >>> 0 !== ESP_APP_DESC_MAGIC)
+    return 'That is an ESP32 image, but not an app image the mod can boot.';
+  const name = imageStr(buf, 0x50, 32);
+  if (name !== PROJECT_NAME)
+    return `That is firmware for ${safeStr(name) || 'another product'}, not the GameBoy HiFi mod.`;
+  if (buf.byteLength > APP_SLOT_BYTES)
+    return 'That image is too big for the mod’s app slot.';
+  return null;
+}
+
 function onFwFile(file) {
   if (!file) return;
   const r = new FileReader();
   r.onload = () => {
+    const problem = fwImageProblem(r.result);
+    if (problem) {
+      otaImage = null;
+      $('fwFlash').disabled = true;
+      $('fwHint').innerHTML = `<b>${file.name}</b> &middot; not usable`;
+      $('fwStatus').textContent = problem;
+      log(`rejected ${file.name}: ${problem}`, 'err-t');
+      return;
+    }
     otaImage = r.result;
     const size = otaImage.byteLength, crc = crc32(otaImage);
+    const ver  = safeStr(imageStr(otaImage, 0x30, 32));
     $('fwHint').innerHTML = `<b>${file.name}</b> &middot; ${(size / 1024).toFixed(0)} KB`;
     $('fwFlash').disabled = false;
-    $('fwStatus').textContent = 'Ready to flash.';
-    log(`loaded ${file.name}: ${size} bytes, crc32 0x${crc.toString(16).padStart(8, '0')}`, 'dim-t');
+    $('fwStatus').textContent = ver ? `Ready to flash version ${ver}.` : 'Ready to flash.';
+    log(`loaded ${file.name}: ${size} bytes, v${ver}, crc32 0x${crc.toString(16).padStart(8, '0')}`, 'dim-t');
   };
   r.readAsArrayBuffer(file);
 }

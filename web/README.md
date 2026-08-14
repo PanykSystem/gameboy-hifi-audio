@@ -34,7 +34,11 @@ The Firmware update card pushes a new `firmware.bin` to the device over
 Bluetooth. Drop the file, click Flash firmware, and keep the page open until the
 device reboots into the new image (a minute or two; audio pauses). The transfer
 uses windowed flow control with a host-side crc32 and on-device SHA-256
-validation before the boot slot swaps. Older firmware without the OTA
+validation before the boot slot swaps. The dropped file is checked before any of
+it is sent: it has to be an ESP32 app image, built from this project, and small
+enough for the app slot, so the cable-only full-flash image or another product's
+firmware is refused in the picker instead of partway through a transfer. The
+device enforces the same project check itself when the transfer ends. Older firmware without the OTA
 characteristics is detected, and the card disables itself.
 
 The card shows the installed firmware version and slot from the device. The
