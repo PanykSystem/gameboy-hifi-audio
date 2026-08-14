@@ -22,6 +22,18 @@ CONFIG_BTDM_CTRL_MODE_BTDM=y
 # Run the BLE GATT config server alongside the A2DP source. Needs BT_BLE_ENABLED.
 CONFIG_GBHIFI_BLE_CONFIG=y
 
+# Pin the BT controller task to core 1 (IDF default: core 0). With everything
+# Bluetooth on core 0, A2DP streaming saturates it (top: controller 28% + BTC/SBC
+# encode 43% + BTU 18% + HCI 8% = 98%, IDLE0 pegged at 0) and BTC -- the
+# lowest-priority BT task, the one doing the SBC encode -- comes up ~3 ms short
+# per second. The encoder then under-delivers media (~94% of 44.1 kHz measured by
+# RTP timestamp advance vs wall clock) and the sink inserts ~150 ms of silence
+# every ~2 s to re-sync: the "choppy Bluetooth" symptom. Moving the controller's
+# 28% to core 1 gives BTC the headroom on core 0; core 1 affords it because the
+# pipeline now skips the local DSP path while a sink streams (the local outputs
+# are muted/suspended for the whole stream -- see audio_pipeline.c).
+CONFIG_BTDM_CTRL_PINNED_TO_CORE_1=y
+
 # Power management. Tickless idle (automatic light sleep) deschedules the audio
 # pipeline task long enough to underrun the A2DP stream and garble Bluetooth, so
 # it stays off. PM_ENABLE stays on for DFS and BT controller modem-sleep, which
@@ -39,14 +51,15 @@ CONFIG_FREERTOS_USE_TICKLESS_IDLE=n
 # CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
 # CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 
-# Task watchdog: do NOT watch the core-0 idle task. The whole Bluetooth stack is
-# pinned to core 0 (controller + HCI + BTU + the SBC encode in BTC) and during
-# A2DP streaming it legitimately leaves that core with no idle time. That is not
-# a hang, but the watchdog treats it as one and, on this IDF, prints six lines
+# Task watchdog: do NOT watch the core-0 idle task. When the whole Bluetooth
+# stack lived on core 0, A2DP streaming legitimately left that core with no idle
+# time; the watchdog treated it as a hang and, on this IDF, printed six lines
 # plus a full backtrace over a 115200 UART from a high-priority context -- a
-# blocking stall long enough to starve the I2S DMA, which is audible as a chop
-# every 5 s on BOTH the speaker and the A2DP stream. Watching core 1 (where the
-# audio task runs) is kept: a stall there is a real fault.
+# blocking stall long enough to starve the I2S DMA, audible as a chop every 5 s
+# on BOTH outputs. With the controller now on core 1, core 0 idles ~40% even
+# while streaming, but connect/pairing bursts can still peg it transiently, so
+# the watch stays off. Watching core 1 (audio task + controller) is kept: a
+# stall there is a real fault.
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
 
 # CPU at 80 MHz. The DSP load is light and this saves about 20 mA versus 240 MHz.

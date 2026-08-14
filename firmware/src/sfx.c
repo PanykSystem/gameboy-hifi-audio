@@ -70,6 +70,31 @@ static void stream_clip(const char *name)
     ESP_LOGI(TAG, "play %s: %u Hz, %u frames", path,
              (unsigned)hdr.sample_rate, (unsigned)hdr.num_frames);
 
+    // Fast path: a clip already at the pipeline rate needs no resampling, so
+    // stream it fread -> FIFO with no per-sample work. This matters during A2DP:
+    // this task runs at priority 8 under the audio pipeline (10) and the BT
+    // controller (23) on core 1, and the ~5-10% of the core it gets there is not
+    // enough for the float resampler below at 44.1 k -- a 4 s clip stretched to
+    // ~13 s of continuous starved-but-busy feeding, stuttering the cue, starving
+    // IDLE1 into the task watchdog, and backing up BT TX with nonstop flash
+    // reads until the SBC encoder's buffer mallocs failed. The copy path is
+    // pure I/O and sits blocked on the FIFO like it should. (Off-rate clips
+    // still take the resampler and remain best played while not streaming.)
+    if (hdr.sample_rate == (uint32_t)PIPE_RATE) {
+        int16_t buf[SRC_CHUNK];
+        for (;;) {
+            size_t n = fread(buf, sizeof(int16_t), SRC_CHUNK, f);
+            if (n == 0) break;
+            xStreamBufferSend(s_clip_fifo, buf, n * sizeof(int16_t),
+                              pdMS_TO_TICKS(200));
+            if (clip_preempted()) break;
+            if (n < SRC_CHUNK) break;
+        }
+        fclose(f);
+        ESP_LOGI(TAG, "clip done: %s", name);
+        return;
+    }
+
     // Streaming linear resampler. step = src/out samples per output frame.
     const float step = (float)hdr.sample_rate / (float)PIPE_RATE;
     int16_t src[SRC_CHUNK];
@@ -126,6 +151,7 @@ flush_tail:
     }
     #undef SRC_NEXT
     fclose(f);
+    ESP_LOGI(TAG, "clip done: %s", name);
 }
 
 static void feeder_task(void *arg)
@@ -312,10 +338,15 @@ esp_err_t sfx_init(void)
         s_sine[i] = sinf(2.0f * (float)M_PI * (float)i / (float)SINE_LUT_SIZE);
     }
 
-    // Priority 8: below the audio pipeline (10); it only needs to keep the
-    // FIFO ahead of the per-block drain, and does blocking file I/O.
-    // Pinned to core 1 with the rest of the audio chain, off the BT core (0).
-    BaseType_t ok = xTaskCreatePinnedToCore(feeder_task, "sfx_feed", 4096, NULL, 8, NULL, 1);
+    // Priority 8: it only needs to keep the FIFO ahead of the per-block drain,
+    // and does blocking file I/O. Pinned to core 0: since the BT controller
+    // moved to core 1 (sdkconfig CONFIG_BTDM_CTRL_PINNED_TO_CORE_1), core 1
+    // runs the audio pipeline + controller at ~90% during A2DP and the feeder
+    // starved there (a streamed clip stretched ~2x with silence gaps, IDLE1
+    // tripped the task watchdog, and the backed-up BT TX ran the SBC encoder
+    // out of buffers). Core 0 idles ~40% while streaming -- the Bluedroid host
+    // tasks there all outrank priority 8, so the feeder soaks idle time only.
+    BaseType_t ok = xTaskCreatePinnedToCore(feeder_task, "sfx_feed", 4096, NULL, 8, NULL, 0);
     if (ok != pdPASS) return ESP_FAIL;
 
     ESP_LOGI(TAG, "cue player ready");

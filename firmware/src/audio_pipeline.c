@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
@@ -56,8 +57,15 @@ static const char *TAG = "audio";
 // WAVEDUMP_BEGIN / WAVEDUMP_END markers over UART for tools/plot_wavedump.py. The dump
 // printf stalls this real-time task ~1 s, so audio hiccups during a capture (fine for a
 // bench measurement; the samples are already grabbed before the dump runs).
+//
+// The capture buffer is heap-allocated per request (by audio_pipeline_capture, in
+// the caller's context) and freed by the pipeline task after the dump. A static
+// buffer here would park 8 KB of DRAM for a bench-only feature -- DRAM the SBC
+// encoder's 4 KB media buffers need at their tightest (streaming + a BLE config
+// client + clip playback ran the heap dry and chopped the stream).
 #define WAVEDUMP_MAX 1024                    // 23.2 ms at 44.1 kHz
-static volatile int s_wd_request = 0;        // samples to capture on next read (0 = idle)
+static volatile int      s_wd_request = 0;   // samples to capture on next read (0 = idle)
+static int32_t *volatile s_wd_buf     = NULL; // owned by the in-flight capture
 
 static StreamBufferHandle_t s_pcm_stream = NULL;
 // True only while a sink is actively streaming (set from bt_a2d on the media
@@ -143,6 +151,17 @@ void audio_pipeline_load_stats(audio_load_t *out)
 void audio_pipeline_capture(int samples)
 {
     if (samples <= 0 || samples > WAVEDUMP_MAX) samples = WAVEDUMP_MAX;
+    if (s_wd_buf) return;   // a capture is already in flight; ignore
+    // Allocated here (console-task context), freed by the pipeline task after
+    // the dump. Failing is fine -- wavedump is a bench tool and the heap is
+    // deliberately tight while streaming; try again with the stream stopped.
+    int32_t *buf = malloc((size_t)samples * 2 * sizeof(int32_t));
+    if (!buf) {
+        printf("wavedump: not enough free heap (%d frames); stop streaming and retry\n",
+               samples);
+        return;
+    }
+    s_wd_buf = buf;
     s_wd_request = samples;
 }
 
@@ -265,7 +284,9 @@ static void pipeline_task(void *arg)
     size_t  fill_min = SIZE_MAX, fill_max = 0;
     int64_t window_start_us = esp_timer_get_time();
     // On-demand capture buffer (filled across reads, one read is only READ_FRAMES).
-    static int32_t wd_buf[WAVEDUMP_MAX * 2];
+    // Heap-allocated per capture by audio_pipeline_capture(); freed here after the
+    // dump so the 8 KB isn't resident between bench captures.
+    int32_t *wd_buf = NULL;
     int wd_have = 0;      // samples captured into the active dump
     int wd_target = 0;    // 0 = not capturing; else samples requested for this dump
     bool bt_streaming_prev = false;   // edge-detect the streaming gate for buffer reset
@@ -301,9 +322,10 @@ static void pipeline_task(void *arg)
         if (wd_target == 0 && s_wd_request > 0) {
             wd_target = s_wd_request;
             s_wd_request = 0;
+            wd_buf = s_wd_buf;
             wd_have = 0;
         }
-        if (wd_target > 0) {
+        if (wd_target > 0 && wd_buf) {
             for (size_t i = 0; i < frames && wd_have < wd_target; i++) {
                 wd_buf[wd_have * 2]     = stereo_buf[i * 2];
                 wd_buf[wd_have * 2 + 1] = stereo_buf[i * 2 + 1];
@@ -317,6 +339,9 @@ static void pipeline_task(void *arg)
                 }
                 printf("WAVEDUMP_END\n");
                 wd_target = 0;
+                free(wd_buf);
+                wd_buf = NULL;
+                s_wd_buf = NULL;   // capture complete; allow the next request
             }
         }
 
@@ -391,11 +416,25 @@ static void pipeline_task(void *arg)
         } else if (s_pcm_stream && bt_streaming_prev && !bt_streaming) {
             xStreamBufferReset(s_pcm_stream);   // streaming ended: drop stale audio
         }
-        bt_streaming_prev = bt_streaming;
+        // (bt_streaming_prev is updated at the end of the loop iteration: the
+        // DAC-zeroing block below also needs to see the idle->streaming edge.)
 
         // Local DSP: stereo speaker EQ, digital volume, SFX cue mix, saturate,
         // in place on the interleaved local buffer.
-        dsp_process_local(local_buf, frames);
+        //
+        // Skipped entirely while a sink streams: STREAMING and local playback are
+        // mutually exclusive (the state machine mutes the speaker amp for the whole
+        // stream, and a wired HP plug suspends A2DP), so the local program is
+        // computed only to be played into muted/disconnected outputs. At 80 MHz
+        // that waste is what starves core 0's SBC encoder of its escape hatch:
+        // dropping it frees the core-1 headroom the relocated BT controller task
+        // needs (see CONFIG_BTDM_CTRL_PINNED_TO_CORE_1 in sdkconfig.defaults).
+        // The gate/amp-mute state simply freezes for the duration; app_sm's
+        // stream-wide amp mute owns the speaker while streaming, and the gate
+        // resumes from its pre-stream state when the stream ends.
+        if (!bt_streaming) {
+            dsp_process_local(local_buf, frames);
+        }
 
         // Spectrum tap: mirror the *post-DSP* output the user is actually hearing
         // into the rings so the web visualizer reflects live EQ/volume/SFX. Follow
@@ -419,10 +458,21 @@ static void pipeline_task(void *arg)
         // which the state machine's mute policy gates (silent during BT streaming
         // and while wired HP is plugged). Same clock domain as the RX read, so
         // writing the same frame count keeps the bus balanced.
-        for (size_t i = 0; i < frames; i++) {
-            dac_buf[i * 2]     = (int32_t)local_buf[i * 2]     << 16;
-            dac_buf[i * 2 + 1] = (int32_t)local_buf[i * 2 + 1] << 16;
+        //
+        // While a sink streams, the local outputs are muted/unplugged and
+        // dsp_process_local was skipped, so drive the DAC with zeros instead of
+        // the raw un-volumed capture: one memset on the edge, then the buffer
+        // stays zero (the loop below is skipped). The write itself stays -- it
+        // paces the TX side and keeps the bus balanced.
+        if (!bt_streaming) {
+            for (size_t i = 0; i < frames; i++) {
+                dac_buf[i * 2]     = (int32_t)local_buf[i * 2]     << 16;
+                dac_buf[i * 2 + 1] = (int32_t)local_buf[i * 2 + 1] << 16;
+            }
+        } else if (!bt_streaming_prev) {
+            memset(dac_buf, 0, sizeof(dac_buf));
         }
+        bt_streaming_prev = bt_streaming;
         // Load accounting: compute time for this block (read-return to DAC
         // hand-off; the blocking read/write are pacing, not load). The budget is
         // the block's real-time length. Wavedump blocks are excluded -- the CSV

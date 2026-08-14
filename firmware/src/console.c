@@ -526,11 +526,29 @@ static int cmd_radio(int argc, char **argv)
 // `pm dfs on|off`: bench knob for dynamic frequency scaling. on lets the CPU
 // drop to 40 MHz when no task holds a max-freq lock (80 MHz under load); off
 // pins 80 MHz. Watch for audio underruns while on. Does not persist.
+// `pm freq 80|160|240`: bench knob to pin the CPU at a different clock for
+// load experiments (pins min = max, DFS off). Does not persist.
 static int cmd_pm(int argc, char **argv)
 {
+    if (argc == 3 && !strcmp(argv[1], "freq")) {
+        int mhz = atoi(argv[2]);
+        if (mhz != 80 && mhz != 160 && mhz != 240) {
+            printf("usage: pm freq 80|160|240\n");
+            return 1;
+        }
+        esp_pm_config_t cfg = {
+            .max_freq_mhz = mhz,
+            .min_freq_mhz = mhz,
+            .light_sleep_enable = false,
+        };
+        esp_err_t err = esp_pm_configure(&cfg);
+        printf("%s: CPU pinned at %d MHz\n",
+               err == ESP_OK ? "ok" : "FAILED", mhz);
+        return err == ESP_OK ? 0 : 1;
+    }
     if (argc != 3 || strcmp(argv[1], "dfs") ||
         (strcmp(argv[2], "on") && strcmp(argv[2], "off"))) {
-        printf("usage: pm dfs on|off\n");
+        printf("usage: pm dfs on|off | pm freq 80|160|240\n");
         return 1;
     }
     bool on = (strcmp(argv[2], "on") == 0);
@@ -786,7 +804,7 @@ static void register_cmds(void)
         { .command = "batt",  .help = "Battery meter / chemistry: batt [alkaline|nimh|lipo]", .func = cmd_batt },
         { .command = "nr",    .help = "Noise reduction: nr | hpf <hz> | lpf <hz> [order] | notch <hz> [q] | gate <dBFS> [range] | btmute <dBFS>", .func = cmd_nr },
         { .command = "radio", .help = "RF bench controls: radio on|off | ble|bt on|off | bleint <ms> | blepwr|btpwr <dBm> | specms <ms>", .func = cmd_radio },
-        { .command = "pm",    .help = "Power bench controls: pm dfs on|off",       .func = cmd_pm },
+        { .command = "pm",    .help = "Power bench controls: pm dfs on|off | pm freq 80|160|240", .func = cmd_pm },
         { .command = "wavedump",.help = "Capture ADC samples for analysis: wavedump [n]", .func = cmd_wavedump },
         { .command = "outvol",.help = "Mode A analog volume (HP+spk drivers): outvol <0-100>", .func = cmd_outvol },
         { .command = "hp",    .help = "Override HP-detect (bench): hp plug|unplug|follow", .func = cmd_hp },
