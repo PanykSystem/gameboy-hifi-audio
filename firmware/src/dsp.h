@@ -51,3 +51,10 @@ void dsp_process_local(int16_t *stereo, size_t frames);
 // encoder's stream buffer.
 void dsp_process_bt(int16_t *stereo, size_t frames);
 
+// Reset the BT path's DSP state (filter delay lines, gate envelope, volume
+// seed). The pipeline calls dsp_process_bt() only while a sink is streaming,
+// so it calls this on the idle->streaming edge to start the new stream from
+// clean state instead of whatever the last stream left behind. Audio-task
+// context only.
+void dsp_bt_reset(void);
+

@@ -431,6 +431,26 @@ void dsp_process_local(int16_t *stereo, size_t frames)
     }
 }
 
+void dsp_bt_reset(void)
+{
+    // Fresh state for a new A2DP stream. The pipeline skips dsp_process_bt()
+    // entirely while no sink is streaming, so on the idle->streaming edge the
+    // delay lines and envelopes hold whatever the *last* stream left in them;
+    // flush the filters and seed the gains so the first blocks neither ring on
+    // stale samples nor fade in. Called from the audio task only, on the edge,
+    // before this block's dsp_process_bt().
+    memset(s_bt_nr_w_hpf,   0, sizeof(s_bt_nr_w_hpf));
+    memset(s_bt_nr_w_lpf,   0, sizeof(s_bt_nr_w_lpf));
+    memset(s_bt_nr_w_notch, 0, sizeof(s_bt_nr_w_notch));
+    memset(s_btw_bass,   0, sizeof(s_btw_bass));
+    memset(s_btw_mid,    0, sizeof(s_btw_mid));
+    memset(s_btw_treble, 0, sizeof(s_btw_treble));
+    s_bt_gate_target  = 1.0f;
+    s_bt_gate_gain    = 1.0f;
+    s_bt_gate_silence = 0;
+    s_bt_cur_gain     = s_bt_vol_target;
+}
+
 void dsp_process_bt(int16_t *stereo, size_t frames)
 {
     if (!stereo || frames == 0) return;

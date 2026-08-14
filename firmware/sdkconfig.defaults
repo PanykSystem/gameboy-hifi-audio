@@ -28,12 +28,22 @@ CONFIG_GBHIFI_BLE_CONFIG=y
 # carry the streaming-power savings; disabling PM entirely boot-loops.
 CONFIG_PM_ENABLE=y
 CONFIG_FREERTOS_USE_TICKLESS_IDLE=n
-# Bench diagnostics: per-task run-time counters for the console `top` command.
-CONFIG_FREERTOS_USE_TRACE_FACILITY=y
-CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
-CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
+# Per-task run-time stats (console `top`) stay OFF in production builds: the
+# counters hook every context switch on both cores, and during A2DP streaming
+# core 0 (controller + HCI + BTU + SBC encode in BTC) runs ~97% loaded with a
+# context-switch storm -- the per-switch overhead starved BTC_TASK and chopped
+# the stream (task_wdt on IDLE0 confirmed the saturation). Uncomment all three
+# to diagnose CPU use on the bench; `top` compiles out cleanly without them and
+# the cheap per-block `load` command still works.
+# CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+# CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
+# CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 
 # CPU at 80 MHz. The DSP load is light and this saves about 20 mA versus 240 MHz.
+# Verified 2026-08-13: the audio task runs at ~42% of one core here with the
+# reconstruction filter on, and raising the clock to 240 MHz does not change the
+# dropouts heard while a BLE config client is connected, so the clock is not the
+# constraint.
 CONFIG_ESP32_DEFAULT_CPU_FREQ_80=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y
 

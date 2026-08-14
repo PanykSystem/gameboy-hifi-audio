@@ -352,10 +352,21 @@ static void pipeline_task(void *arg)
         // BT DSP: source-side noise reduction (HPF/LPF/notch + gate) + optional EQ
         // + digital volume + SFX cue mix, in place on out_buf before the
         // stream-buffer push so the SBC encoder sees the cleaned, gated signal (not
-        // the raw capture floor, which SBC renders as audible digital hash). No-op
-        // passthrough only when nr is off AND BT EQ is off, volume is unity, and no
-        // cue is playing.
-        dsp_process_bt(out_buf, frames);
+        // the raw capture floor, which SBC renders as audible digital hash).
+        //
+        // Run it only while a sink is actually streaming: the push below is gated
+        // on s_bt_streaming, so outside of streaming the processed buffer is
+        // thrown away and the NR chain (a dozen biquad passes since the
+        // reconstruction LPF) is pure waste. At 80 MHz that waste was real: it
+        // left the boot chime's blocks over budget while the boot-time init
+        // storm ran, which chopped the chime. On the idle->streaming edge the BT
+        // DSP state (filter delay lines, gate envelope) is stale from the last
+        // stream, so reset it for a clean start.
+        bool bt_streaming = s_bt_streaming;
+        if (bt_streaming) {
+            if (!bt_streaming_prev) dsp_bt_reset();
+            dsp_process_bt(out_buf, frames);
+        }
 
         // Push the interleaved stereo PCM into the stream buffer for A2DP, but only
         // while a sink is actively streaming. Gating the fill keeps the buffer from
@@ -365,7 +376,6 @@ static void pipeline_task(void *arg)
         // connect starts from ~0 latency; the consumer (a2d_data_cb) is idle once the
         // media stops, so the reset does not race a concurrent read. Non-blocking
         // send: if the consumer falls behind, drop rather than stall I2S DMA.
-        bool bt_streaming = s_bt_streaming;
         if (s_pcm_stream && bt_streaming) {
             // High-water trim: skip the push while the queue is already at the mark,
             // so latency stays bounded instead of drifting toward full. Drops the
