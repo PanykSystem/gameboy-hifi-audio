@@ -39,6 +39,16 @@ CONFIG_FREERTOS_USE_TICKLESS_IDLE=n
 # CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
 # CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 
+# Task watchdog: do NOT watch the core-0 idle task. The whole Bluetooth stack is
+# pinned to core 0 (controller + HCI + BTU + the SBC encode in BTC) and during
+# A2DP streaming it legitimately leaves that core with no idle time. That is not
+# a hang, but the watchdog treats it as one and, on this IDF, prints six lines
+# plus a full backtrace over a 115200 UART from a high-priority context -- a
+# blocking stall long enough to starve the I2S DMA, which is audible as a chop
+# every 5 s on BOTH the speaker and the A2DP stream. Watching core 1 (where the
+# audio task runs) is kept: a stall there is a real fault.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
+
 # CPU at 80 MHz. The DSP load is light and this saves about 20 mA versus 240 MHz.
 # Verified 2026-08-13: the audio task runs at ~42% of one core here with the
 # reconstruction filter on, and raising the clock to 240 MHz does not change the
