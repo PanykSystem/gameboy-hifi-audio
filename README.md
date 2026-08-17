@@ -7,6 +7,14 @@ and it also drives the GBA's built-in speaker and wired headphone jack itself,
 with onboard EQ, volume, and sound effects.
 
 <p align="center">
+  <a href="https://youtu.be/aRh9ZIPrqOQ">
+    <img src="https://img.youtube.com/vi/aRh9ZIPrqOQ/maxresdefault.jpg" alt="Watch: I Fixed the GBA's Audio" width="600">
+  </a>
+  <br>
+  <sub>What the mod does, start to finish</sub>
+</p>
+
+<p align="center">
   <img src="docs/images/main-board.png" alt="GameBoy HiFi AGB main board" height="300">
   &nbsp;&nbsp;
   <img src="docs/images/flex.png" alt="GameBoy HiFi AGB flex" height="300">
@@ -30,13 +38,14 @@ What you get:
   <sub>The browser config page: a live spectrum and per-output EQ, tuned over Bluetooth with no app to install</sub>
 </p>
 
-Prebuilt, pre-assembled kits are coming soon at [cajunpanda.com](https://cajunpanda.com),
-for anyone who would rather not source the parts and solder it themselves. Kits will ship
-pre-flashed and update over Bluetooth, so they need no programming cable.
+Prebuilt, pre-assembled kits are coming soon at
+[cajunpanda.com](https://cajunpanda.com/shop/gameboy-hifi-audio), for anyone who would
+rather not source the parts and solder it themselves. Kits ship pre-flashed and update
+over Bluetooth, so they need no programming cable. The listing also has an A/B recording
+of the mod with its filters off and on, and an optional speaker.
 
-I am looking for beta testers interested in trying out the mod. If you want an early kit or
-board, reply on the [beta testers discussion](https://github.com/cajunpanda/gameboy-hifi-audio/discussions/1)
-or join the [Discord](https://discord.gg/6BNetnK6kC).
+Questions, build photos, and troubleshooting happen on the
+[Discord](https://discord.gg/6BNetnK6kC).
 
 This repository currently holds the board for the original Game Boy Advance
 (AGB). The firmware is shared across models. Boards for other Game Boy models
