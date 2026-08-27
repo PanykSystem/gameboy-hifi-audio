@@ -82,7 +82,7 @@ works.
 
 1. Connect the flex to the main board through the flat-flex connector.
 2. Reattach the GBA's own speaker — the one you removed from the mainboard — to
-   the mod PCB's `SPK+` / `SPK-` pads, not back to the GBA mainboard. The mod's
+   the mod PCB's `J5` / `J6` pads, not back to the GBA mainboard. The mod's
    own amplifier drives it.
 3. Fold the flex as designed and secure the main board inside the shell.
 
