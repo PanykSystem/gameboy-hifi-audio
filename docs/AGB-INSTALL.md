@@ -12,12 +12,19 @@ console's audio system.
 
 ## Video walkthrough
 
-A video of the flex install, start to finish. Watch it before you begin, then
-follow the written steps below as you work.
+Two videos cover the install, start to finish: the flex install, then the PCB
+install and speaker wiring. Watch them before you begin, then follow the written
+steps below as you work.
 
 <p align="center">
   <a href="https://youtu.be/mPUGNb_kJ9I">
     <img src="https://img.youtube.com/vi/mPUGNb_kJ9I/maxresdefault.jpg" alt="Watch: Game Boy Advance HiFi Audio Mod Flex Install" width="600">
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://youtu.be/ZFsWwqtNinI">
+    <img src="https://img.youtube.com/vi/ZFsWwqtNinI/maxresdefault.jpg" alt="Watch: Game Boy Advance HiFi Audio Mod PCB Install" width="600">
   </a>
 </p>
 
